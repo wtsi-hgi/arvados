@@ -32,8 +32,8 @@ RUN bundle install --gemfile=/usr/src/arvados/services/api/Gemfile && \
     rm /tmp/config_databases.sh && \
     /etc/init.d/postgresql start && \
     cd /usr/src/arvados/services/api && \
-    rake db:setup && \
-    rake assets:precompile && \
+    bundle exec rake db:setup && \
+    bundle exec rake assets:precompile && \
     ./script/create_superuser_token.rb $(cat /tmp/superuser_token) && \
     chown www-data:www-data config.ru && \
     chown www-data:www-data log -R && \
