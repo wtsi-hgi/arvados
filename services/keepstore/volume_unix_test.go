@@ -2,51 +2,80 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
 
-func TempUnixVolume(t *testing.T, serialize bool) UnixVolume {
+type TestableUnixVolume struct {
+	UnixVolume
+	t *testing.T
+}
+
+func NewTestableUnixVolume(t *testing.T, serialize bool, readonly bool) *TestableUnixVolume {
 	d, err := ioutil.TempDir("", "volume_test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return MakeUnixVolume(d, serialize)
+	var locker sync.Locker
+	if serialize {
+		locker = &sync.Mutex{}
+	}
+	return &TestableUnixVolume{
+		UnixVolume: UnixVolume{
+			root:     d,
+			locker:   locker,
+			readonly: readonly,
+		},
+		t: t,
+	}
 }
 
-func _teardown(v UnixVolume) {
-	if v.queue != nil {
-		close(v.queue)
+// PutRaw writes a Keep block directly into a UnixVolume, even if
+// the volume is readonly.
+func (v *TestableUnixVolume) PutRaw(locator string, data []byte) {
+	defer func(orig bool) {
+		v.readonly = orig
+	}(v.readonly)
+	v.readonly = false
+	err := v.Put(locator, data)
+	if err != nil {
+		v.t.Fatal(err)
 	}
-	os.RemoveAll(v.root)
 }
 
-// store writes a Keep block directly into a UnixVolume, for testing
-// UnixVolume methods.
-//
-func _store(t *testing.T, vol UnixVolume, filename string, block []byte) {
-	blockdir := fmt.Sprintf("%s/%s", vol.root, filename[:3])
-	if err := os.MkdirAll(blockdir, 0755); err != nil {
-		t.Fatal(err)
+func (v *TestableUnixVolume) TouchWithDate(locator string, lastPut time.Time) {
+	err := syscall.Utime(v.blockPath(locator), &syscall.Utimbuf{lastPut.Unix(), lastPut.Unix()})
+	if err != nil {
+		v.t.Fatal(err)
 	}
+}
 
-	blockpath := fmt.Sprintf("%s/%s", blockdir, filename)
-	if f, err := os.Create(blockpath); err == nil {
-		f.Write(block)
-		f.Close()
-	} else {
-		t.Fatal(err)
+func (v *TestableUnixVolume) Teardown() {
+	if err := os.RemoveAll(v.root); err != nil {
+		v.t.Fatal(err)
 	}
+}
+
+func TestUnixVolumeWithGenericTests(t *testing.T) {
+	DoGenericVolumeTests(t, func(t *testing.T) TestableVolume {
+		return NewTestableUnixVolume(t, false, false)
+	})
 }
 
 func TestGet(t *testing.T) {
-	v := TempUnixVolume(t, false)
-	defer _teardown(v)
-	_store(t, v, TEST_HASH, TEST_BLOCK)
+	v := NewTestableUnixVolume(t, false, false)
+	defer v.Teardown()
+	v.Put(TEST_HASH, TEST_BLOCK)
 
 	buf, err := v.Get(TEST_HASH)
 	if err != nil {
@@ -58,9 +87,9 @@ func TestGet(t *testing.T) {
 }
 
 func TestGetNotFound(t *testing.T) {
-	v := TempUnixVolume(t, false)
-	defer _teardown(v)
-	_store(t, v, TEST_HASH, TEST_BLOCK)
+	v := NewTestableUnixVolume(t, false, false)
+	defer v.Teardown()
+	v.Put(TEST_HASH, TEST_BLOCK)
 
 	buf, err := v.Get(TEST_HASH_2)
 	switch {
@@ -73,9 +102,45 @@ func TestGetNotFound(t *testing.T) {
 	}
 }
 
+func TestIndexTo(t *testing.T) {
+	v := NewTestableUnixVolume(t, false, false)
+	defer v.Teardown()
+
+	v.Put(TEST_HASH, TEST_BLOCK)
+	v.Put(TEST_HASH_2, TEST_BLOCK_2)
+	v.Put(TEST_HASH_3, TEST_BLOCK_3)
+
+	buf := new(bytes.Buffer)
+	v.IndexTo("", buf)
+	index_rows := strings.Split(string(buf.Bytes()), "\n")
+	sort.Strings(index_rows)
+	sorted_index := strings.Join(index_rows, "\n")
+	m, err := regexp.MatchString(
+		`^\n`+TEST_HASH+`\+\d+ \d+\n`+
+			TEST_HASH_3+`\+\d+ \d+\n`+
+			TEST_HASH_2+`\+\d+ \d+$`,
+		sorted_index)
+	if err != nil {
+		t.Error(err)
+	} else if !m {
+		t.Errorf("Got index %q for empty prefix", sorted_index)
+	}
+
+	for _, prefix := range []string{"f", "f15", "f15ac"} {
+		buf = new(bytes.Buffer)
+		v.IndexTo(prefix, buf)
+		m, err := regexp.MatchString(`^`+TEST_HASH_2+`\+\d+ \d+\n$`, string(buf.Bytes()))
+		if err != nil {
+			t.Error(err)
+		} else if !m {
+			t.Errorf("Got index %q for prefix %q", string(buf.Bytes()), prefix)
+		}
+	}
+}
+
 func TestPut(t *testing.T) {
-	v := TempUnixVolume(t, false)
-	defer _teardown(v)
+	v := NewTestableUnixVolume(t, false, false)
+	defer v.Teardown()
 
 	err := v.Put(TEST_HASH, TEST_BLOCK)
 	if err != nil {
@@ -91,8 +156,8 @@ func TestPut(t *testing.T) {
 }
 
 func TestPutBadVolume(t *testing.T) {
-	v := TempUnixVolume(t, false)
-	defer _teardown(v)
+	v := NewTestableUnixVolume(t, false, false)
+	defer v.Teardown()
 
 	os.Chmod(v.root, 000)
 	err := v.Put(TEST_HASH, TEST_BLOCK)
@@ -101,12 +166,39 @@ func TestPutBadVolume(t *testing.T) {
 	}
 }
 
+func TestUnixVolumeReadonly(t *testing.T) {
+	v := NewTestableUnixVolume(t, false, true)
+	defer v.Teardown()
+
+	v.PutRaw(TEST_HASH, TEST_BLOCK)
+
+	_, err := v.Get(TEST_HASH)
+	if err != nil {
+		t.Errorf("got err %v, expected nil", err)
+	}
+
+	err = v.Put(TEST_HASH, TEST_BLOCK)
+	if err != MethodDisabledError {
+		t.Errorf("got err %v, expected MethodDisabledError", err)
+	}
+
+	err = v.Touch(TEST_HASH)
+	if err != MethodDisabledError {
+		t.Errorf("got err %v, expected MethodDisabledError", err)
+	}
+
+	err = v.Delete(TEST_HASH)
+	if err != MethodDisabledError {
+		t.Errorf("got err %v, expected MethodDisabledError", err)
+	}
+}
+
 // TestPutTouch
 //     Test that when applying PUT to a block that already exists,
 //     the block's modification time is updated.
 func TestPutTouch(t *testing.T) {
-	v := TempUnixVolume(t, false)
-	defer _teardown(v)
+	v := NewTestableUnixVolume(t, false, false)
+	defer v.Teardown()
 
 	if err := v.Put(TEST_HASH, TEST_BLOCK); err != nil {
 		t.Error(err)
@@ -120,17 +212,11 @@ func TestPutTouch(t *testing.T) {
 	// Set the stored block's mtime far enough in the past that we
 	// can see the difference between "timestamp didn't change"
 	// and "timestamp granularity is too low".
-	{
-		oldtime := time.Now().Add(-20 * time.Second).Unix()
-		if err := syscall.Utime(v.blockPath(TEST_HASH),
-			&syscall.Utimbuf{oldtime, oldtime}); err != nil {
-			t.Error(err)
-		}
+	v.TouchWithDate(TEST_HASH, time.Now().Add(-20*time.Second))
 
-		// Make sure v.Mtime() agrees the above Utime really worked.
-		if t0, err := v.Mtime(TEST_HASH); err != nil || t0.IsZero() || !t0.Before(threshold) {
-			t.Errorf("Setting mtime failed: %v, %v", t0, err)
-		}
+	// Make sure v.Mtime() agrees the above Utime really worked.
+	if t0, err := v.Mtime(TEST_HASH); err != nil || t0.IsZero() || !t0.Before(threshold) {
+		t.Errorf("Setting mtime failed: %v, %v", t0, err)
 	}
 
 	// Write the same block again.
@@ -139,13 +225,10 @@ func TestPutTouch(t *testing.T) {
 	}
 
 	// Verify threshold < t1
-	t1, err := v.Mtime(TEST_HASH)
-	if err != nil {
+	if t1, err := v.Mtime(TEST_HASH); err != nil {
 		t.Error(err)
-	}
-	if t1.Before(threshold) {
-		t.Errorf("t1 %v must be >= threshold %v after v.Put ",
-			t1, threshold)
+	} else if t1.Before(threshold) {
+		t.Errorf("t1 %v should be >= threshold %v after v.Put ", t1, threshold)
 	}
 }
 
@@ -165,12 +248,12 @@ func TestPutTouch(t *testing.T) {
 //
 func TestGetSerialized(t *testing.T) {
 	// Create a volume with I/O serialization enabled.
-	v := TempUnixVolume(t, true)
-	defer _teardown(v)
+	v := NewTestableUnixVolume(t, true, false)
+	defer v.Teardown()
 
-	_store(t, v, TEST_HASH, TEST_BLOCK)
-	_store(t, v, TEST_HASH_2, TEST_BLOCK_2)
-	_store(t, v, TEST_HASH_3, TEST_BLOCK_3)
+	v.Put(TEST_HASH, TEST_BLOCK)
+	v.Put(TEST_HASH_2, TEST_BLOCK_2)
+	v.Put(TEST_HASH_3, TEST_BLOCK_3)
 
 	sem := make(chan int)
 	go func(sem chan int) {
@@ -214,8 +297,8 @@ func TestGetSerialized(t *testing.T) {
 
 func TestPutSerialized(t *testing.T) {
 	// Create a volume with I/O serialization enabled.
-	v := TempUnixVolume(t, true)
-	defer _teardown(v)
+	v := NewTestableUnixVolume(t, true, false)
+	defer v.Teardown()
 
 	sem := make(chan int)
 	go func(sem chan int) {
@@ -243,7 +326,7 @@ func TestPutSerialized(t *testing.T) {
 	}(sem)
 
 	// Wait for all goroutines to finish
-	for done := 0; done < 2; {
+	for done := 0; done < 3; {
 		done += <-sem
 	}
 
@@ -274,8 +357,8 @@ func TestPutSerialized(t *testing.T) {
 }
 
 func TestIsFull(t *testing.T) {
-	v := TempUnixVolume(t, false)
-	defer _teardown(v)
+	v := NewTestableUnixVolume(t, false, false)
+	defer v.Teardown()
 
 	full_path := v.root + "/full"
 	now := fmt.Sprintf("%d", time.Now().Unix())
@@ -290,5 +373,120 @@ func TestIsFull(t *testing.T) {
 	os.Symlink(expired, full_path)
 	if v.IsFull() {
 		t.Errorf("%s: should no longer be full", v)
+	}
+}
+
+func TestNodeStatus(t *testing.T) {
+	v := NewTestableUnixVolume(t, false, false)
+	defer v.Teardown()
+
+	// Get node status and make a basic sanity check.
+	volinfo := v.Status()
+	if volinfo.MountPoint != v.root {
+		t.Errorf("GetNodeStatus mount_point %s, expected %s", volinfo.MountPoint, v.root)
+	}
+	if volinfo.DeviceNum == 0 {
+		t.Errorf("uninitialized device_num in %v", volinfo)
+	}
+	if volinfo.BytesFree == 0 {
+		t.Errorf("uninitialized bytes_free in %v", volinfo)
+	}
+	if volinfo.BytesUsed == 0 {
+		t.Errorf("uninitialized bytes_used in %v", volinfo)
+	}
+}
+
+func TestUnixVolumeGetFuncWorkerError(t *testing.T) {
+	v := NewTestableUnixVolume(t, false, false)
+	defer v.Teardown()
+
+	v.Put(TEST_HASH, TEST_BLOCK)
+	mockErr := errors.New("Mock error")
+	err := v.getFunc(v.blockPath(TEST_HASH), func(rdr io.Reader) error {
+		return mockErr
+	})
+	if err != mockErr {
+		t.Errorf("Got %v, expected %v", err, mockErr)
+	}
+}
+
+func TestUnixVolumeGetFuncFileError(t *testing.T) {
+	v := NewTestableUnixVolume(t, false, false)
+	defer v.Teardown()
+
+	funcCalled := false
+	err := v.getFunc(v.blockPath(TEST_HASH), func(rdr io.Reader) error {
+		funcCalled = true
+		return nil
+	})
+	if err == nil {
+		t.Errorf("Expected error opening non-existent file")
+	}
+	if funcCalled {
+		t.Errorf("Worker func should not have been called")
+	}
+}
+
+func TestUnixVolumeGetFuncWorkerWaitsOnMutex(t *testing.T) {
+	v := NewTestableUnixVolume(t, false, false)
+	defer v.Teardown()
+
+	v.Put(TEST_HASH, TEST_BLOCK)
+
+	mtx := NewMockMutex()
+	v.locker = mtx
+
+	funcCalled := make(chan struct{})
+	go v.getFunc(v.blockPath(TEST_HASH), func(rdr io.Reader) error {
+		funcCalled <- struct{}{}
+		return nil
+	})
+	select {
+	case mtx.AllowLock <- struct{}{}:
+	case <-funcCalled:
+		t.Fatal("Function was called before mutex was acquired")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timed out before mutex was acquired")
+	}
+	select {
+	case <-funcCalled:
+	case mtx.AllowUnlock <- struct{}{}:
+		t.Fatal("Mutex was released before function was called")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timed out waiting for funcCalled")
+	}
+	select {
+	case mtx.AllowUnlock <- struct{}{}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timed out waiting for getFunc() to release mutex")
+	}
+}
+
+func TestUnixVolumeCompare(t *testing.T) {
+	v := NewTestableUnixVolume(t, false, false)
+	defer v.Teardown()
+
+	v.Put(TEST_HASH, TEST_BLOCK)
+	err := v.Compare(TEST_HASH, TEST_BLOCK)
+	if err != nil {
+		t.Errorf("Got err %q, expected nil", err)
+	}
+
+	err = v.Compare(TEST_HASH, []byte("baddata"))
+	if err != CollisionError {
+		t.Errorf("Got err %q, expected %q", err, CollisionError)
+	}
+
+	v.Put(TEST_HASH, []byte("baddata"))
+	err = v.Compare(TEST_HASH, TEST_BLOCK)
+	if err != DiskHashError {
+		t.Errorf("Got err %q, expected %q", err, DiskHashError)
+	}
+
+	p := fmt.Sprintf("%s/%s/%s", v.root, TEST_HASH[:3], TEST_HASH)
+	os.Chmod(p, 000)
+	err = v.Compare(TEST_HASH, TEST_BLOCK)
+	if err == nil || strings.Index(err.Error(), "permission denied") < 0 {
+		t.Errorf("Got err %q, expected %q", err, "permission denied")
 	}
 }

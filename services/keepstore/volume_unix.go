@@ -1,109 +1,45 @@
-// A UnixVolume is a Volume backed by a locally mounted disk.
-//
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
-// IORequests are encapsulated Get or Put requests.  They are used to
-// implement serialized I/O (i.e. only one read/write operation per
-// volume). When running in serialized mode, the Keep front end sends
-// IORequests on a channel to an IORunner, which handles them one at a
-// time and returns an IOResponse.
-//
-type IOMethod int
-
-const (
-	KeepGet IOMethod = iota
-	KeepPut
-)
-
-type IORequest struct {
-	method IOMethod
-	loc    string
-	data   []byte
-	reply  chan *IOResponse
-}
-
-type IOResponse struct {
-	data []byte
-	err  error
-}
-
-// A UnixVolume has the following properties:
-//
-//   root
-//       the path to the volume's root directory
-//   queue
-//       A channel of IORequests. If non-nil, all I/O requests for
-//       this volume should be queued on this channel; the result
-//       will be delivered on the IOResponse channel supplied in the
-//       request.
-//
+// A UnixVolume stores and retrieves blocks in a local directory.
 type UnixVolume struct {
-	root  string // path to this volume
-	queue chan *IORequest
-}
-
-func (v *UnixVolume) IOHandler() {
-	for req := range v.queue {
-		var result IOResponse
-		switch req.method {
-		case KeepGet:
-			result.data, result.err = v.Read(req.loc)
-		case KeepPut:
-			result.err = v.Write(req.loc, req.data)
-		}
-		req.reply <- &result
-	}
-}
-
-func MakeUnixVolume(root string, serialize bool) (v UnixVolume) {
-	if serialize {
-		v = UnixVolume{root, make(chan *IORequest)}
-		go v.IOHandler()
-	} else {
-		v = UnixVolume{root, nil}
-	}
-	return
-}
-
-func (v *UnixVolume) Get(loc string) ([]byte, error) {
-	if v.queue == nil {
-		return v.Read(loc)
-	}
-	reply := make(chan *IOResponse)
-	v.queue <- &IORequest{KeepGet, loc, nil, reply}
-	response := <-reply
-	return response.data, response.err
-}
-
-func (v *UnixVolume) Put(loc string, block []byte) error {
-	if v.queue == nil {
-		return v.Write(loc, block)
-	}
-	reply := make(chan *IOResponse)
-	v.queue <- &IORequest{KeepPut, loc, block, reply}
-	response := <-reply
-	return response.err
+	// path to the volume's root directory
+	root string
+	// something to lock during IO, typically a sync.Mutex (or nil
+	// to skip locking)
+	locker   sync.Locker
+	readonly bool
 }
 
 func (v *UnixVolume) Touch(loc string) error {
+	if v.readonly {
+		return MethodDisabledError
+	}
 	p := v.blockPath(loc)
 	f, err := os.OpenFile(p, os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if v.locker != nil {
+		v.locker.Lock()
+		defer v.locker.Unlock()
+	}
 	if e := lockfile(f); e != nil {
 		return e
 	}
@@ -122,28 +58,102 @@ func (v *UnixVolume) Mtime(loc string) (time.Time, error) {
 	}
 }
 
-// Read retrieves a block identified by the locator string "loc", and
-// returns its contents as a byte slice.
-//
-// If the block could not be opened or read, Read returns a nil slice
-// and the os.Error that was generated.
-//
-// If the block is present but its content hash does not match loc,
-// Read returns the block and a CorruptError.  It is the caller's
-// responsibility to decide what (if anything) to do with the
-// corrupted data block.
-//
-func (v *UnixVolume) Read(loc string) ([]byte, error) {
-	buf, err := ioutil.ReadFile(v.blockPath(loc))
-	return buf, err
+// Lock the locker (if one is in use), open the file for reading, and
+// call the given function if and when the file is ready to read.
+func (v *UnixVolume) getFunc(path string, fn func(io.Reader) error) error {
+	if v.locker != nil {
+		v.locker.Lock()
+		defer v.locker.Unlock()
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return fn(f)
 }
 
-// Write stores a block of data identified by the locator string
+// stat is os.Stat() with some extra sanity checks.
+func (v *UnixVolume) stat(path string) (os.FileInfo, error) {
+	stat, err := os.Stat(path)
+	if err == nil {
+		if stat.Size() < 0 {
+			err = os.ErrInvalid
+		} else if stat.Size() > BLOCKSIZE {
+			err = TooLongError
+		}
+	}
+	return stat, err
+}
+
+// Get retrieves a block identified by the locator string "loc", and
+// returns its contents as a byte slice.
+//
+// Get returns a nil buffer IFF it returns a non-nil error.
+func (v *UnixVolume) Get(loc string) ([]byte, error) {
+	path := v.blockPath(loc)
+	stat, err := v.stat(path)
+	if err != nil {
+		return nil, err
+	}
+	buf := bufs.Get(int(stat.Size()))
+	err = v.getFunc(path, func(rdr io.Reader) error {
+		_, err = io.ReadFull(rdr, buf)
+		return err
+	})
+	if err != nil {
+		bufs.Put(buf)
+		return nil, err
+	}
+	return buf, nil
+}
+
+// Compare returns nil if Get(loc) would return the same content as
+// expect. It is functionally equivalent to Get() followed by
+// bytes.Compare(), but uses less memory.
+func (v *UnixVolume) Compare(loc string, expect []byte) error {
+	path := v.blockPath(loc)
+	stat, err := v.stat(path)
+	if err != nil {
+		return err
+	}
+	bufLen := 1 << 20
+	if int64(bufLen) > stat.Size() {
+		bufLen = int(stat.Size())
+	}
+	cmp := expect
+	buf := make([]byte, bufLen)
+	return v.getFunc(path, func(rdr io.Reader) error {
+		// Loop invariants: all data read so far matched what
+		// we expected, and the first N bytes of cmp are
+		// expected to equal the next N bytes read from
+		// reader.
+		for {
+			n, err := rdr.Read(buf)
+			if n > len(cmp) || bytes.Compare(cmp[:n], buf[:n]) != 0 {
+				return collisionOrCorrupt(loc[:32], expect[:len(expect)-len(cmp)], buf[:n], rdr)
+			}
+			cmp = cmp[n:]
+			if err == io.EOF {
+				if len(cmp) != 0 {
+					return collisionOrCorrupt(loc[:32], expect[:len(expect)-len(cmp)], nil, nil)
+				}
+				return nil
+			} else if err != nil {
+				return err
+			}
+		}
+	})
+}
+
+// Put stores a block of data identified by the locator string
 // "loc".  It returns nil on success.  If the volume is full, it
 // returns a FullError.  If the write fails due to some other error,
 // that error is returned.
-//
-func (v *UnixVolume) Write(loc string, block []byte) error {
+func (v *UnixVolume) Put(loc string, block []byte) error {
+	if v.readonly {
+		return MethodDisabledError
+	}
 	if v.IsFull() {
 		return FullError
 	}
@@ -161,8 +171,14 @@ func (v *UnixVolume) Write(loc string, block []byte) error {
 	}
 	bpath := v.blockPath(loc)
 
+	if v.locker != nil {
+		v.locker.Lock()
+		defer v.locker.Unlock()
+	}
 	if _, err := tmpfile.Write(block); err != nil {
 		log.Printf("%s: writing to %s: %s\n", v, bpath, err)
+		tmpfile.Close()
+		os.Remove(tmpfile.Name())
 		return err
 	}
 	if err := tmpfile.Close(); err != nil {
@@ -179,7 +195,7 @@ func (v *UnixVolume) Write(loc string, block []byte) error {
 }
 
 // Status returns a VolumeStatus struct describing the volume's
-// current state.
+// current state, or nil if an error occurs.
 //
 func (v *UnixVolume) Status() *VolumeStatus {
 	var fs syscall.Statfs_t
@@ -205,14 +221,15 @@ func (v *UnixVolume) Status() *VolumeStatus {
 	return &VolumeStatus{v.root, devnum, free, used}
 }
 
-// Index returns a list of blocks found on this volume which begin with
-// the specified prefix. If the prefix is an empty string, Index returns
-// a complete list of blocks.
+var blockDirRe = regexp.MustCompile(`^[0-9a-f]+$`)
+
+// IndexTo writes (to the given Writer) a list of blocks found on this
+// volume which begin with the specified prefix. If the prefix is an
+// empty string, IndexTo writes a complete list of blocks.
 //
-// The return value is a multiline string (separated by
-// newlines). Each line is in the format
+// Each block is given in the format
 //
-//     locator+size modification-time
+//     locator+size modification-time {newline}
 //
 // e.g.:
 //
@@ -220,41 +237,73 @@ func (v *UnixVolume) Status() *VolumeStatus {
 //     e4d41e6fd68460e0e3fc18cc746959d2+67108864 1377796043
 //     e4de7a2810f5554cd39b36d8ddb132ff+67108864 1388701136
 //
-func (v *UnixVolume) Index(prefix string) (output string) {
-	filepath.Walk(v.root,
-		func(path string, info os.FileInfo, err error) error {
-			// This WalkFunc inspects each path in the volume
-			// and prints an index line for all files that begin
-			// with prefix.
-			if err != nil {
-				log.Printf("IndexHandler: %s: walking to %s: %s",
-					v, path, err)
-				return nil
+func (v *UnixVolume) IndexTo(prefix string, w io.Writer) error {
+	var lastErr error = nil
+	rootdir, err := os.Open(v.root)
+	if err != nil {
+		return err
+	}
+	defer rootdir.Close()
+	for {
+		names, err := rootdir.Readdirnames(1)
+		if err == io.EOF {
+			return lastErr
+		} else if err != nil {
+			return err
+		}
+		if !strings.HasPrefix(names[0], prefix) && !strings.HasPrefix(prefix, names[0]) {
+			// prefix excludes all blocks stored in this dir
+			continue
+		}
+		if !blockDirRe.MatchString(names[0]) {
+			continue
+		}
+		blockdirpath := filepath.Join(v.root, names[0])
+		blockdir, err := os.Open(blockdirpath)
+		if err != nil {
+			log.Print("Error reading ", blockdirpath, ": ", err)
+			lastErr = err
+			continue
+		}
+		for {
+			fileInfo, err := blockdir.Readdir(1)
+			if err == io.EOF {
+				break
+			} else if err != nil {
+				log.Print("Error reading ", blockdirpath, ": ", err)
+				lastErr = err
+				break
 			}
-			locator := filepath.Base(path)
-			// Skip directories that do not match prefix.
-			// We know there is nothing interesting inside.
-			if info.IsDir() &&
-				!strings.HasPrefix(locator, prefix) &&
-				!strings.HasPrefix(prefix, locator) {
-				return filepath.SkipDir
+			name := fileInfo[0].Name()
+			if !strings.HasPrefix(name, prefix) {
+				continue
 			}
-			// Skip any file that is not apparently a locator, e.g. .meta files
-			if !IsValidLocator(locator) {
-				return nil
-			}
-			// Print filenames beginning with prefix
-			if !info.IsDir() && strings.HasPrefix(locator, prefix) {
-				output = output + fmt.Sprintf(
-					"%s+%d %d\n", locator, info.Size(), info.ModTime().Unix())
-			}
-			return nil
-		})
-
-	return
+			_, err = fmt.Fprint(w,
+				name,
+				"+", fileInfo[0].Size(),
+				" ", fileInfo[0].ModTime().Unix(),
+				"\n")
+		}
+		blockdir.Close()
+	}
 }
 
 func (v *UnixVolume) Delete(loc string) error {
+	// Touch() must be called before calling Write() on a block.  Touch()
+	// also uses lockfile().  This avoids a race condition between Write()
+	// and Delete() because either (a) the file will be deleted and Touch()
+	// will signal to the caller that the file is not present (and needs to
+	// be re-written), or (b) Touch() will update the file's timestamp and
+	// Delete() will read the correct up-to-date timestamp and choose not to
+	// delete the file.
+
+	if v.readonly {
+		return MethodDisabledError
+	}
+	if v.locker != nil {
+		v.locker.Lock()
+		defer v.locker.Unlock()
+	}
 	p := v.blockPath(loc)
 	f, err := os.OpenFile(p, os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
@@ -266,15 +315,15 @@ func (v *UnixVolume) Delete(loc string) error {
 	}
 	defer unlockfile(f)
 
-	// If the block has been PUT more recently than -permission_ttl,
-	// return success without removing the block.  This guards against
-	// a race condition where a block is old enough that Data Manager
-	// has added it to the trash list, but the user submitted a PUT
-	// for the block since then.
+	// If the block has been PUT in the last blob_signature_ttl
+	// seconds, return success without removing the block. This
+	// protects data from garbage collection until it is no longer
+	// possible for clients to retrieve the unreferenced blocks
+	// anyway (because the permission signatures have expired).
 	if fi, err := os.Stat(p); err != nil {
 		return err
 	} else {
-		if time.Since(fi.ModTime()) < permission_ttl {
+		if time.Since(fi.ModTime()) < blob_signature_ttl {
 			return nil
 		}
 	}
@@ -340,6 +389,10 @@ func (v *UnixVolume) FreeDiskSpace() (free uint64, err error) {
 
 func (v *UnixVolume) String() string {
 	return fmt.Sprintf("[UnixVolume %s]", v.root)
+}
+
+func (v *UnixVolume) Writable() bool {
+	return !v.readonly
 }
 
 // lockfile and unlockfile use flock(2) to manage kernel file locks.
