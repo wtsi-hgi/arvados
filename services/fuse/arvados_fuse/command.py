@@ -151,8 +151,7 @@ class Mount(object):
         self.api = arvados.safeapi.ThreadSafeApiCache(
             apiconfig=arvados.config.settings(),
             keep_params={
-                'block_cache': arvados.keep.KeepBlockCache(self.args.file_cache),
-                'num_retries': self.args.retries,
+                "block_cache": arvados.keep.KeepBlockCache(self.args.file_cache)
             })
         # Do a sanity check that we have a working arvados host + token.
         self.api.users().current().execute()
@@ -276,6 +275,18 @@ From here, the following directories are available:
 
 '''.format(api_host, user_email)
 
+    def _fuse_main(self):
+        try:
+            sys.stderr.write("_fuse_main()\n")
+            llfuse.main()
+        except:
+            sys.stderr.write("_fuse_main() got exception\n")
+            llfuse.close(unmount=False)
+            raise
+        sys.stderr.write("_fuse_main() back from llfuse.main() and about to llfuse.close()\n")
+        llfuse.close()
+        sys.stderr.write("_fuse_main() back from llfuse.close()\n")
+
     def _run_exec(self):
         # Initialize the fuse connection
         llfuse.init(self.operations, self.args.mountpoint, self._fuse_options())
@@ -284,7 +295,7 @@ From here, the following directories are available:
         if self.args.mode != 'by_pdh':
             self.operations.listen_for_events()
 
-        t = threading.Thread(None, lambda: llfuse.main())
+        t = threading.Thread(target=self._fuse_main)
         t.start()
 
         # wait until the driver is finished initializing
@@ -301,6 +312,7 @@ From here, the following directories are available:
 
             # wait for process to complete.
             rc = sp.wait()
+            sys.stderr.write("arv-mount: returned from subprocess with returncode %s\n" % rc)
 
             # restore default signal handlers.
             signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -314,9 +326,12 @@ From here, the following directories are available:
             except AttributeError:
                 pass
         finally:
+            sys.stderr.write("arv-mount: calling fusermount -u -z %s\n" % self.args.mountpoint)
             subprocess.call(["fusermount", "-u", "-z", self.args.mountpoint])
-            self.operations.destroy()
-        exit(rc)
+            #sys.stderr.write("arv-mount: calling self.operations.destroy()\n")
+            #self.operations.destroy()
+        sys.stderr.write("arv-mount: calling sys.exit with status %s\n" % rc)
+        sys.exit(rc)
 
     def _run_standalone(self):
         try:
