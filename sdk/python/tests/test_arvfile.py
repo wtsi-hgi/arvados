@@ -6,7 +6,7 @@ import io
 import mock
 import os
 import unittest
-import hashlib
+import time
 
 import arvados
 from arvados._ranges import Range
@@ -29,7 +29,7 @@ class ArvadosFileWriterTestCase(unittest.TestCase):
             self.requests.append(locator)
             return self.blocks.get(locator)
         def put(self, data, num_retries=None):
-            pdh = "%s+%i" % (hashlib.md5(data).hexdigest(), len(data))
+            pdh = tutil.str_keep_locator(data)
             self.blocks[pdh] = str(data)
             return pdh
 
@@ -452,7 +452,7 @@ class ArvadosFileReaderTestCase(StreamFileReaderTestCase):
         n = 0
         blocks = {}
         for d in ['01234', '34567', '67890']:
-            loc = '{}+{}'.format(hashlib.md5(d).hexdigest(), len(d))
+            loc = tutil.str_keep_locator(d)
             blocks[loc] = d
             stream.append(Range(loc, n, len(d)))
             n += len(d)
@@ -625,6 +625,20 @@ class BlockManagerTest(unittest.TestCase):
             self.assertTrue(mockkeep.put.called)
             self.assertEqual(bufferblock.state(), arvados.arvfile._BufferBlock.COMMITTED)
             self.assertIsNone(bufferblock.buffer_view)
+
+    def test_bufferblock_commit_pending(self):
+        # Test for bug #7225
+        mockkeep = mock.MagicMock()
+        mockkeep.put.side_effect = lambda x: time.sleep(1)
+        with arvados.arvfile._BlockManager(mockkeep) as blockmanager:
+            bufferblock = blockmanager.alloc_bufferblock()
+            bufferblock.append("foo")
+
+            blockmanager.commit_bufferblock(bufferblock, False)
+            self.assertEqual(bufferblock.state(), arvados.arvfile._BufferBlock.PENDING)
+
+            blockmanager.commit_bufferblock(bufferblock, True)
+            self.assertEqual(bufferblock.state(), arvados.arvfile._BufferBlock.COMMITTED)
 
 
     def test_bufferblock_commit_with_error(self):

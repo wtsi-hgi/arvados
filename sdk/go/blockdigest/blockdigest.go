@@ -3,14 +3,13 @@ package blockdigest
 
 import (
 	"fmt"
-	"log"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
 var LocatorPattern = regexp.MustCompile(
-	"^[0-9a-fA-F]{32}\\+[0-9]+(\\+[A-Z][A-Za-z0-9@_-]+)*$")
+	"^[0-9a-fA-F]{32}\\+[0-9]+(\\+[A-Z][A-Za-z0-9@_-]*)*$")
 
 // Stores a Block Locator Digest compactly, up to 128 bits.
 // Can be used as a map key.
@@ -56,15 +55,6 @@ func FromString(s string) (dig BlockDigest, err error) {
 	}
 	dig = d
 	return
-}
-
-// Will fatal with the error if an error is encountered
-func AssertFromString(s string) BlockDigest {
-	d, err := FromString(s)
-	if err != nil {
-		log.Fatalf("Error creating BlockDigest from %s: %v", s, err)
-	}
-	return d
 }
 
 func IsBlockLocator(s string) bool {

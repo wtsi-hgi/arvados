@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -53,6 +54,9 @@ func MakeRESTRouter() *mux.Router {
 	// Replace the current trash queue.
 	rest.HandleFunc(`/trash`, TrashHandler).Methods("PUT")
 
+	// Untrash moves blocks from trash back into store
+	rest.HandleFunc(`/untrash/{hash:[0-9a-f]{32}}`, UntrashHandler).Methods("PUT")
+
 	// Any request which does not match any of these routes gets
 	// 400 Bad Request.
 	rest.NotFoundHandler = http.HandlerFunc(BadRequestHandler)
@@ -60,12 +64,14 @@ func MakeRESTRouter() *mux.Router {
 	return rest
 }
 
+// BadRequestHandler is a HandleFunc to address bad requests.
 func BadRequestHandler(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, BadRequestError.Error(), BadRequestError.HTTPCode)
 }
 
+// GetBlockHandler is a HandleFunc to address Get block requests.
 func GetBlockHandler(resp http.ResponseWriter, req *http.Request) {
-	if enforce_permissions {
+	if enforcePermissions {
 		locator := req.URL.Path[1:] // strip leading slash
 		if err := VerifySignature(locator, GetApiToken(req)); err != nil {
 			http.Error(resp, err.Error(), err.(*KeepError).HTTPCode)
@@ -87,6 +93,7 @@ func GetBlockHandler(resp http.ResponseWriter, req *http.Request) {
 	resp.Write(block)
 }
 
+// PutBlockHandler is a HandleFunc to address Put block requests.
 func PutBlockHandler(resp http.ResponseWriter, req *http.Request) {
 	hash := mux.Vars(req)["hash"]
 
@@ -99,7 +106,7 @@ func PutBlockHandler(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if req.ContentLength > BLOCKSIZE {
+	if req.ContentLength > BlockSize {
 		http.Error(resp, TooLongError.Error(), TooLongError.HTTPCode)
 		return
 	}
@@ -117,7 +124,7 @@ func PutBlockHandler(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	err = PutBlock(buf, hash)
+	replication, err := PutBlock(buf, hash)
 	bufs.Put(buf)
 
 	if err != nil {
@@ -128,18 +135,17 @@ func PutBlockHandler(resp http.ResponseWriter, req *http.Request) {
 
 	// Success; add a size hint, sign the locator if possible, and
 	// return it to the client.
-	return_hash := fmt.Sprintf("%s+%d", hash, req.ContentLength)
-	api_token := GetApiToken(req)
-	if PermissionSecret != nil && api_token != "" {
-		expiry := time.Now().Add(blob_signature_ttl)
-		return_hash = SignLocator(return_hash, api_token, expiry)
+	returnHash := fmt.Sprintf("%s+%d", hash, req.ContentLength)
+	apiToken := GetApiToken(req)
+	if PermissionSecret != nil && apiToken != "" {
+		expiry := time.Now().Add(blobSignatureTTL)
+		returnHash = SignLocator(returnHash, apiToken, expiry)
 	}
-	resp.Write([]byte(return_hash + "\n"))
+	resp.Header().Set("X-Keep-Replicas-Stored", strconv.Itoa(replication))
+	resp.Write([]byte(returnHash + "\n"))
 }
 
-// IndexHandler
-//     A HandleFunc to address /index and /index/{prefix} requests.
-//
+// IndexHandler is a HandleFunc to address /index and /index/{prefix} requests.
 func IndexHandler(resp http.ResponseWriter, req *http.Request) {
 	// Reject unauthorized requests.
 	if !IsDataManagerToken(GetApiToken(req)) {
@@ -177,20 +183,15 @@ func IndexHandler(resp http.ResponseWriter, req *http.Request) {
 //            * device_num (an integer identifying the underlying filesystem)
 //            * bytes_free
 //            * bytes_used
-//
-type VolumeStatus struct {
-	MountPoint string `json:"mount_point"`
-	DeviceNum  uint64 `json:"device_num"`
-	BytesFree  uint64 `json:"bytes_free"`
-	BytesUsed  uint64 `json:"bytes_used"`
-}
 
+// PoolStatus struct
 type PoolStatus struct {
 	Alloc uint64 `json:"BytesAllocated"`
 	Cap   int    `json:"BuffersMax"`
 	Len   int    `json:"BuffersInUse"`
 }
 
+// NodeStatus struct
 type NodeStatus struct {
 	Volumes    []*VolumeStatus `json:"volumes"`
 	BufferPool PoolStatus
@@ -202,6 +203,7 @@ type NodeStatus struct {
 var st NodeStatus
 var stLock sync.Mutex
 
+// StatusHandler addresses /status.json requests.
 func StatusHandler(resp http.ResponseWriter, req *http.Request) {
 	stLock.Lock()
 	readNodeStatus(&st)
@@ -284,7 +286,7 @@ func DeleteHandler(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if never_delete {
+	if neverDelete {
 		http.Error(resp, MethodDisabledError.Error(), MethodDisabledError.HTTPCode)
 		return
 	}
@@ -297,7 +299,7 @@ func DeleteHandler(resp http.ResponseWriter, req *http.Request) {
 		Failed  int `json:"copies_failed"`
 	}
 	for _, vol := range KeepVM.AllWritable() {
-		if err := vol.Delete(hash); err == nil {
+		if err := vol.Trash(hash); err == nil {
 			result.Deleted++
 		} else if os.IsNotExist(err) {
 			continue
@@ -360,11 +362,13 @@ func DeleteHandler(resp http.ResponseWriter, req *http.Request) {
    If the JSON unmarshalling fails, return 400 Bad Request.
 */
 
+// PullRequest consists of a block locator and an ordered list of servers
 type PullRequest struct {
 	Locator string   `json:"locator"`
 	Servers []string `json:"servers"`
 }
 
+// PullHandler processes "PUT /pull" requests for the data manager.
 func PullHandler(resp http.ResponseWriter, req *http.Request) {
 	// Reject unauthorized requests.
 	if !IsDataManagerToken(GetApiToken(req)) {
@@ -394,11 +398,13 @@ func PullHandler(resp http.ResponseWriter, req *http.Request) {
 	pullq.ReplaceQueue(plist)
 }
 
+// TrashRequest consists of a block locator and it's Mtime
 type TrashRequest struct {
 	Locator    string `json:"locator"`
 	BlockMtime int64  `json:"block_mtime"`
 }
 
+// TrashHandler processes /trash requests.
 func TrashHandler(resp http.ResponseWriter, req *http.Request) {
 	// Reject unauthorized requests.
 	if !IsDataManagerToken(GetApiToken(req)) {
@@ -428,6 +434,53 @@ func TrashHandler(resp http.ResponseWriter, req *http.Request) {
 	trashq.ReplaceQueue(tlist)
 }
 
+// UntrashHandler processes "PUT /untrash/{hash:[0-9a-f]{32}}" requests for the data manager.
+func UntrashHandler(resp http.ResponseWriter, req *http.Request) {
+	// Reject unauthorized requests.
+	if !IsDataManagerToken(GetApiToken(req)) {
+		http.Error(resp, UnauthorizedError.Error(), UnauthorizedError.HTTPCode)
+		return
+	}
+
+	hash := mux.Vars(req)["hash"]
+
+	if len(KeepVM.AllWritable()) == 0 {
+		http.Error(resp, "No writable volumes", http.StatusNotFound)
+		return
+	}
+
+	var untrashedOn, failedOn []string
+	var numNotFound int
+	for _, vol := range KeepVM.AllWritable() {
+		err := vol.Untrash(hash)
+
+		if os.IsNotExist(err) {
+			numNotFound++
+		} else if err != nil {
+			log.Printf("Error untrashing %v on volume %v", hash, vol.String())
+			failedOn = append(failedOn, vol.String())
+		} else {
+			log.Printf("Untrashed %v on volume %v", hash, vol.String())
+			untrashedOn = append(untrashedOn, vol.String())
+		}
+	}
+
+	if numNotFound == len(KeepVM.AllWritable()) {
+		http.Error(resp, "Block not found on any of the writable volumes", http.StatusNotFound)
+		return
+	}
+
+	if len(failedOn) == len(KeepVM.AllWritable()) {
+		http.Error(resp, "Failed to untrash on all writable volumes", http.StatusInternalServerError)
+	} else {
+		respBody := "Successfully untrashed on: " + strings.Join(untrashedOn, ",")
+		if len(failedOn) > 0 {
+			respBody += "; Failed to untrash on: " + strings.Join(failedOn, ",")
+		}
+		resp.Write([]byte(respBody))
+	}
+}
+
 // ==============================
 // GetBlock and PutBlock implement lower-level code for handling
 // blocks by rooting through volumes connected to the local machine.
@@ -439,8 +492,8 @@ func TrashHandler(resp http.ResponseWriter, req *http.Request) {
 // should be the only part of the code that cares about which volume a
 // block is stored on, so it should be responsible for figuring out
 // which volume to check for fetching blocks, storing blocks, etc.
-
 // ==============================
+
 // GetBlock fetches and returns the block identified by "hash".
 //
 // On success, GetBlock returns a byte slice with the block data, and
@@ -451,10 +504,9 @@ func TrashHandler(resp http.ResponseWriter, req *http.Request) {
 // If the block found does not have the correct MD5 hash, returns
 // DiskHashError.
 //
-
 func GetBlock(hash string) ([]byte, error) {
 	// Attempt to read the requested hash from a keep volume.
-	error_to_caller := NotFoundError
+	errorToCaller := NotFoundError
 
 	for _, vol := range KeepVM.AllReadable() {
 		buf, err := vol.Get(hash)
@@ -477,79 +529,80 @@ func GetBlock(hash string) ([]byte, error) {
 			// this.
 			log.Printf("%s: checksum mismatch for request %s (actual %s)",
 				vol, hash, filehash)
-			error_to_caller = DiskHashError
+			errorToCaller = DiskHashError
 			bufs.Put(buf)
 			continue
 		}
-		if error_to_caller == DiskHashError {
+		if errorToCaller == DiskHashError {
 			log.Printf("%s: checksum mismatch for request %s but a good copy was found on another volume and returned",
 				vol, hash)
 		}
 		return buf, nil
 	}
-	return nil, error_to_caller
+	return nil, errorToCaller
 }
 
-/* PutBlock(block, hash)
-   Stores the BLOCK (identified by the content id HASH) in Keep.
-
-   The MD5 checksum of the block must be identical to the content id HASH.
-   If not, an error is returned.
-
-   PutBlock stores the BLOCK on the first Keep volume with free space.
-   A failure code is returned to the user only if all volumes fail.
-
-   On success, PutBlock returns nil.
-   On failure, it returns a KeepError with one of the following codes:
-
-   500 Collision
-          A different block with the same hash already exists on this
-          Keep server.
-   422 MD5Fail
-          The MD5 hash of the BLOCK does not match the argument HASH.
-   503 Full
-          There was not enough space left in any Keep volume to store
-          the object.
-   500 Fail
-          The object could not be stored for some other reason (e.g.
-          all writes failed). The text of the error message should
-          provide as much detail as possible.
-*/
-
-func PutBlock(block []byte, hash string) error {
+// PutBlock Stores the BLOCK (identified by the content id HASH) in Keep.
+//
+// PutBlock(block, hash)
+//   Stores the BLOCK (identified by the content id HASH) in Keep.
+//
+//   The MD5 checksum of the block must be identical to the content id HASH.
+//   If not, an error is returned.
+//
+//   PutBlock stores the BLOCK on the first Keep volume with free space.
+//   A failure code is returned to the user only if all volumes fail.
+//
+//   On success, PutBlock returns nil.
+//   On failure, it returns a KeepError with one of the following codes:
+//
+//   500 Collision
+//          A different block with the same hash already exists on this
+//          Keep server.
+//   422 MD5Fail
+//          The MD5 hash of the BLOCK does not match the argument HASH.
+//   503 Full
+//          There was not enough space left in any Keep volume to store
+//          the object.
+//   500 Fail
+//          The object could not be stored for some other reason (e.g.
+//          all writes failed). The text of the error message should
+//          provide as much detail as possible.
+//
+func PutBlock(block []byte, hash string) (int, error) {
 	// Check that BLOCK's checksum matches HASH.
 	blockhash := fmt.Sprintf("%x", md5.Sum(block))
 	if blockhash != hash {
 		log.Printf("%s: MD5 checksum %s did not match request", hash, blockhash)
-		return RequestHashError
+		return 0, RequestHashError
 	}
 
 	// If we already have this data, it's intact on disk, and we
 	// can update its timestamp, return success. If we have
 	// different data with the same hash, return failure.
-	if err := CompareAndTouch(hash, block); err == nil || err == CollisionError {
-		return err
+	if n, err := CompareAndTouch(hash, block); err == nil || err == CollisionError {
+		return n, err
 	}
 
 	// Choose a Keep volume to write to.
 	// If this volume fails, try all of the volumes in order.
 	if vol := KeepVM.NextWritable(); vol != nil {
 		if err := vol.Put(hash, block); err == nil {
-			return nil // success!
+			return vol.Replication(), nil // success!
 		}
 	}
 
 	writables := KeepVM.AllWritable()
 	if len(writables) == 0 {
 		log.Print("No writable volumes.")
-		return FullError
+		return 0, FullError
 	}
 
 	allFull := true
 	for _, vol := range writables {
 		err := vol.Put(hash, block)
 		if err == nil {
-			return nil // success!
+			return vol.Replication(), nil // success!
 		}
 		if err != FullError {
 			// The volume is not full but the
@@ -562,18 +615,18 @@ func PutBlock(block []byte, hash string) error {
 
 	if allFull {
 		log.Print("All volumes are full.")
-		return FullError
-	} else {
-		// Already logged the non-full errors.
-		return GenericError
+		return 0, FullError
 	}
+	// Already logged the non-full errors.
+	return 0, GenericError
 }
 
-// CompareAndTouch returns nil if one of the volumes already has the
-// given content and it successfully updates the relevant block's
-// modification time in order to protect it from premature garbage
-// collection.
-func CompareAndTouch(hash string, buf []byte) error {
+// CompareAndTouch returns the current replication level if one of the
+// volumes already has the given content and it successfully updates
+// the relevant block's modification time in order to protect it from
+// premature garbage collection. Otherwise, it returns a non-nil
+// error.
+func CompareAndTouch(hash string, buf []byte) (int, error) {
 	var bestErr error = NotFoundError
 	for _, vol := range KeepVM.AllWritable() {
 		if err := vol.Compare(hash, buf); err == CollisionError {
@@ -583,7 +636,7 @@ func CompareAndTouch(hash string, buf []byte) error {
 			// both, so there's no point writing it even
 			// on a different volume.)
 			log.Printf("%s: Compare(%s): %s", vol, hash, err)
-			return err
+			return 0, err
 		} else if os.IsNotExist(err) {
 			// Block does not exist. This is the only
 			// "normal" error: we don't log anything.
@@ -601,17 +654,16 @@ func CompareAndTouch(hash string, buf []byte) error {
 			continue
 		}
 		// Compare and Touch both worked --> done.
-		return nil
+		return vol.Replication(), nil
 	}
-	return bestErr
+	return 0, bestErr
 }
 
 var validLocatorRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
-// IsValidLocator
-//     Return true if the specified string is a valid Keep locator.
-//     When Keep is extended to support hash types other than MD5,
-//     this should be updated to cover those as well.
+// IsValidLocator returns true if the specified string is a valid Keep locator.
+//   When Keep is extended to support hash types other than MD5,
+//   this should be updated to cover those as well.
 //
 func IsValidLocator(loc string) bool {
 	return validLocatorRe.MatchString(loc)
@@ -632,10 +684,10 @@ func GetApiToken(req *http.Request) string {
 }
 
 // IsExpired returns true if the given Unix timestamp (expressed as a
-// hexadecimal string) is in the past, or if timestamp_hex cannot be
+// hexadecimal string) is in the past, or if timestampHex cannot be
 // parsed as a hexadecimal string.
-func IsExpired(timestamp_hex string) bool {
-	ts, err := strconv.ParseInt(timestamp_hex, 16, 0)
+func IsExpired(timestampHex string) bool {
+	ts, err := strconv.ParseInt(timestampHex, 16, 0)
 	if err != nil {
 		log.Printf("IsExpired: %s", err)
 		return true
@@ -643,25 +695,25 @@ func IsExpired(timestamp_hex string) bool {
 	return time.Unix(ts, 0).Before(time.Now())
 }
 
-// CanDelete returns true if the user identified by api_token is
+// CanDelete returns true if the user identified by apiToken is
 // allowed to delete blocks.
-func CanDelete(api_token string) bool {
-	if api_token == "" {
+func CanDelete(apiToken string) bool {
+	if apiToken == "" {
 		return false
 	}
 	// Blocks may be deleted only when Keep has been configured with a
 	// data manager.
-	if IsDataManagerToken(api_token) {
+	if IsDataManagerToken(apiToken) {
 		return true
 	}
-	// TODO(twp): look up api_token with the API server
+	// TODO(twp): look up apiToken with the API server
 	// return true if is_admin is true and if the token
 	// has unlimited scope
 	return false
 }
 
-// IsDataManagerToken returns true if api_token represents the data
+// IsDataManagerToken returns true if apiToken represents the data
 // manager's token.
-func IsDataManagerToken(api_token string) bool {
-	return data_manager_token != "" && api_token == data_manager_token
+func IsDataManagerToken(apiToken string) bool {
+	return dataManagerToken != "" && apiToken == dataManagerToken
 }

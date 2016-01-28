@@ -52,7 +52,7 @@ type MockVolume struct {
 	// channel unblocks all operations. By default, Gate is a
 	// closed channel, so all operations proceed without
 	// blocking. See trash_worker_test.go for an example.
-	Gate   chan struct{}
+	Gate chan struct{}
 
 	called map[string]int
 	mutex  sync.Mutex
@@ -78,11 +78,11 @@ func CreateMockVolume() *MockVolume {
 func (v *MockVolume) CallCount(method string) int {
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
-	if c, ok := v.called[method]; !ok {
+	c, ok := v.called[method]
+	if !ok {
 		return 0
-	} else {
-		return c
 	}
+	return c
 }
 
 func (v *MockVolume) gotCall(method string) {
@@ -183,20 +183,25 @@ func (v *MockVolume) IndexTo(prefix string, w io.Writer) error {
 	return nil
 }
 
-func (v *MockVolume) Delete(loc string) error {
+func (v *MockVolume) Trash(loc string) error {
 	v.gotCall("Delete")
 	<-v.Gate
 	if v.Readonly {
 		return MethodDisabledError
 	}
 	if _, ok := v.Store[loc]; ok {
-		if time.Since(v.Timestamps[loc]) < blob_signature_ttl {
+		if time.Since(v.Timestamps[loc]) < blobSignatureTTL {
 			return nil
 		}
 		delete(v.Store, loc)
 		return nil
 	}
 	return os.ErrNotExist
+}
+
+// TBD
+func (v *MockVolume) Untrash(loc string) error {
+	return nil
 }
 
 func (v *MockVolume) Status() *VolumeStatus {
@@ -213,4 +218,8 @@ func (v *MockVolume) String() string {
 
 func (v *MockVolume) Writable() bool {
 	return !v.Readonly
+}
+
+func (v *MockVolume) Replication() int {
+	return 1
 }

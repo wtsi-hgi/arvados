@@ -53,6 +53,8 @@ class BaseComputeNodeDriver(object):
                 if new_pair is not None:
                     self.create_kwargs[new_pair[0]] = new_pair[1]
 
+        self.sizes = {sz.id: sz for sz in self.real.list_sizes()}
+
     def _init_ping_host(self, ping_host):
         self.ping_host = ping_host
 
@@ -89,7 +91,7 @@ class BaseComputeNodeDriver(object):
     def list_nodes(self):
         return self.real.list_nodes(**self.list_kwargs)
 
-    def arvados_create_kwargs(self, arvados_node):
+    def arvados_create_kwargs(self, size, arvados_node):
         """Return dynamic keyword arguments for create_node.
 
         Subclasses must override this method.  It should return a dictionary
@@ -98,10 +100,15 @@ class BaseComputeNodeDriver(object):
         create_kwargs.
 
         Arguments:
+        * size: The node size that will be created (libcloud NodeSize object)
         * arvados_node: The Arvados node record that will be associated
           with this cloud node, as returned from the API server.
         """
         raise NotImplementedError("BaseComputeNodeDriver.arvados_create_kwargs")
+
+    def broken(self, cloud_node):
+        """Return true if libcloud has indicated the node is in a "broken" state."""
+        return False
 
     def _make_ping_url(self, arvados_node):
         return 'https://{}/arvados/v1/nodes/{}/ping?ping_secret={}'.format(
@@ -110,7 +117,7 @@ class BaseComputeNodeDriver(object):
 
     def create_node(self, size, arvados_node):
         kwargs = self.create_kwargs.copy()
-        kwargs.update(self.arvados_create_kwargs(arvados_node))
+        kwargs.update(self.arvados_create_kwargs(size, arvados_node))
         kwargs['size'] = size
         return self.real.create_node(**kwargs)
 
