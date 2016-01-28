@@ -4,25 +4,61 @@ require 'capybara/poltergeist'
 require 'uri'
 require 'yaml'
 
-POLTERGEIST_OPTS = {
-  window_size: [1200, 800],
-  phantomjs_options: ['--ignore-ssl-errors=true'],
-  inspector: true,
-}
+def available_port for_what
+  Addrinfo.tcp("0.0.0.0", 0).listen do |srv|
+    port = srv.connect_address.ip_port
+    STDERR.puts "Using port #{port} for #{for_what}"
+    return port
+  end
+end
+
+def selenium_opts
+  {
+    port: available_port('selenium'),
+  }
+end
+
+def poltergeist_opts
+  {
+    phantomjs_options: ['--ignore-ssl-errors=true'],
+    port: available_port('poltergeist'),
+    window_size: [1200, 800],
+  }
+end
 
 Capybara.register_driver :poltergeist do |app|
-  Capybara::Poltergeist::Driver.new app, POLTERGEIST_OPTS
+  Capybara::Poltergeist::Driver.new app, poltergeist_opts
+end
+
+Capybara.register_driver :poltergeist_debug do |app|
+  Capybara::Poltergeist::Driver.new app, poltergeist_opts.merge(inspector: true)
 end
 
 Capybara.register_driver :poltergeist_without_file_api do |app|
   js = File.expand_path '../support/remove_file_api.js', __FILE__
-  Capybara::Poltergeist::Driver.new app, POLTERGEIST_OPTS.merge(extensions: [js])
+  Capybara::Poltergeist::Driver.new app, poltergeist_opts.merge(extensions: [js])
+end
+
+Capybara.register_driver :selenium do |app|
+  Capybara::Selenium::Driver.new app, selenium_opts
+end
+
+Capybara.register_driver :selenium_with_download do |app|
+  profile = Selenium::WebDriver::Firefox::Profile.new
+  profile['browser.download.dir'] = DownloadHelper.path.to_s
+  profile['browser.download.downloadDir'] = DownloadHelper.path.to_s
+  profile['browser.download.defaultFolder'] = DownloadHelper.path.to_s
+  profile['browser.download.folderList'] = 2 # "save to user-defined location"
+  profile['browser.download.manager.showWhenStarting'] = false
+  profile['browser.helperApps.alwaysAsk.force'] = false
+  profile['browser.helperApps.neverAsk.saveToDisk'] = 'text/plain,application/octet-stream'
+  Capybara::Selenium::Driver.new app, selenium_opts.merge(profile: profile)
 end
 
 module WaitForAjax
-  Capybara.default_wait_time = 5
+  Capybara.default_max_wait_time = 10
   def wait_for_ajax
-    Timeout.timeout(Capybara.default_wait_time) do
+    Timeout.timeout(Capybara.default_max_wait_time) do
       loop until finished_all_ajax_requests?
     end
   end
@@ -50,8 +86,10 @@ end
 
 module HeadlessHelper
   class HeadlessSingleton
+    @display = ENV['ARVADOS_TEST_HEADLESS_DISPLAY'] || rand(400)+100
+    STDERR.puts "Using display :#{@display} for headless tests"
     def self.get
-      @headless ||= Headless.new reuse: false
+      @headless ||= Headless.new reuse: false, display: @display
     end
   end
 
@@ -73,8 +111,8 @@ module HeadlessHelper
     end
   end
 
-  def need_selenium reason=nil
-    Capybara.current_driver = :selenium
+  def need_selenium reason=nil, driver=:selenium
+    Capybara.current_driver = driver
     unless ENV['ARVADOS_TEST_HEADFUL'] or @headless
       @headless = HeadlessSingleton.get
       @headless.start
@@ -85,6 +123,20 @@ module HeadlessHelper
     unless Capybara.current_driver == :selenium
       Capybara.current_driver = :poltergeist
     end
+  end
+end
+
+module KeepWebConfig
+  def getport service
+    File.read(File.expand_path("../../../../tmp/#{service}.port", __FILE__))
+  end
+
+  def use_keep_web_config
+    @kwport = getport 'keep-web-ssl'
+    @kwdport = getport 'keep-web-dl-ssl'
+    Rails.configuration.keep_web_url = "https://localhost:#{@kwport}/c=%{uuid_or_pdh}"
+    Rails.configuration.keep_web_download_url = "https://localhost:#{@kwdport}/c=%{uuid_or_pdh}"
+    CollectionsController.any_instance.expects(:file_enumerator).never
   end
 end
 

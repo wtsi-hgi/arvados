@@ -6,7 +6,7 @@ title: Install Workbench
 
 h2. Install prerequisites
 
-The Arvados package repository includes Workbench server package that can help automate much of the deployment.
+The Arvados package repository includes a Workbench server package that can help automate much of the deployment.
 
 h3(#install_ruby_and_bundler). Install Ruby and Bundler
 
@@ -15,6 +15,8 @@ h3(#install_ruby_and_bundler). Install Ruby and Bundler
 h2(#install_workbench). Install Workbench and dependencies
 
 Workbench doesn't need its own database, so it does not need to have PostgreSQL installed.
+
+{% include 'note_python27_sc' %}
 
 On a Debian-based system, install the following packages:
 
@@ -30,8 +32,6 @@ On a Red Hat-based system, install the following packages:
 </code></pre>
 </notextile>
 
-{% include 'note_python27_sc' %}
-
 h2. Set up configuration files
 
 The Workbench server package uses configuration files that you write to @/etc/arvados/workbench@ and ensures they're consistently deployed.  Create this directory and copy the example configuration files to it:
@@ -43,7 +43,7 @@ The Workbench server package uses configuration files that you write to @/etc/ar
 </code></pre>
 </notextile>
 
-h2. Configure Workbench
+h2(#configure). Configure Workbench
 
 Edit @/etc/arvados/workbench/application.yml@ following the instructions below.  The deployment script will consistently deploy this to Workbench's configuration directory.  Workbench reads both @application.yml@ and its own @config/application.defaults.yml@ file.  Values in @application.yml@ take precedence over the defaults that are defined in @config/application.defaults.yml@.  The @config/application.yml.example@ file is not read by Workbench and is provided for installation convenience only.
 
@@ -93,9 +93,9 @@ For best performance, we recommend you use Nginx as your Web server front-end, w
 
 <notextile>
 <ol>
-<li><a href="https://www.phusionpassenger.com/documentation/Users%20guide%20Nginx.html">Install Nginx and Phusion Passenger</a>.</li>
+<li><a href="https://www.phusionpassenger.com/library/walkthroughs/deploy/ruby/ownserver/nginx/oss/install_passenger_main.html">Install Nginx and Phusion Passenger</a>.</li>
 
-<li>If you're deploying on CentOS and using the python27 Software Collection, configure Nginx to use it:
+<li>If you're deploying on an older Red Hat-based distribution and installed Pythyon 2.7 from Software Collections, configure Nginx to use it:
 
 <pre><code>~$ <span class="userinput">sudo usermod --shell /bin/bash nginx</span>
 ~$ <span class="userinput">sudo -u nginx sh -c 'echo "[[ -z \$PS1 && -e /opt/rh/python27/enable ]] && source /opt/rh/python27/enable" >>~/.bash_profile'</span>
@@ -115,6 +115,10 @@ For best performance, we recommend you use Nginx as your Web server front-end, w
   passenger_enabled on;
   # If you're using RVM, uncomment the line below.
   #passenger_ruby /usr/local/rvm/wrappers/default/ruby;
+
+  # `client_max_body_size` should match the corresponding setting in
+  # the API server's Nginx configuration.
+  client_max_body_size 128m;
 }
 
 upstream workbench {
@@ -132,6 +136,8 @@ server {
   ssl_certificate_key <span class="userinput">/YOUR/PATH/TO/cert.key</span>;
 
   index  index.html index.htm index.php;
+  # `client_max_body_size` should match the corresponding setting in
+  # the API server's Nginx configuration.
   client_max_body_size 128m;
 
   location / {
@@ -156,10 +162,11 @@ server {
 
 h2. Prepare the Workbench deployment
 
-Now that all your configuration is in place, run @/usr/local/bin/arvados-workbench-upgrade.sh@.  This will install and check your configuration, and install necessary gems.
+{% assign railspkg = "arvados-workbench" %}
+{% include 'install_rails_reconfigure' %}
 
 {% include 'notebox_begin' %}
-You can safely ignore the following error message you may see when installing gems:
+You can safely ignore the following error message you may see when Ruby Gems are installed:
 <notextile>
 <pre><code>themes_for_rails at /usr/local/rvm/gems/ruby-2.1.1/bundler/gems/themes_for_rails-1fd2d7897d75 did not have a valid gemspec.
 This prevents bundler from installing bins or native extensions, but that may not affect its functionality.
@@ -171,16 +178,15 @@ Using themes_for_rails (0.5.1) from https://github.com/holtkampw/themes_for_rail
 </notextile>
 {% include 'notebox_end' %}
 
-This command aborts when it encounters an error.  It's safe to rerun multiple times, so if there's a problem with your configuration, you can fix that and try again.
-
 h2. Trusted client setting
 
 Log in to Workbench once to ensure that the Arvados API server has a record of the Workbench client. (It's OK if Workbench says your account hasn't been activated yet. We'll deal with that next.)
 
-In the <strong>API server</strong> project root, start the rails console.  Locate the ApiClient record for your Workbench installation (typically, while you're setting this up, the @last@ one in the database is the one you want), then set the @is_trusted@ flag for the appropriate client record:
+In the <strong>API server</strong> project root, start the Rails console.  {% include 'install_rails_command' %}
 
-<notextile><pre><code>/var/www/arvados-api/current$ <span class="userinput">RAILS_ENV=production bundle exec rails console</span>
-irb(main):001:0&gt; <span class="userinput">wb = ApiClient.all.last; [wb.url_prefix, wb.created_at]</span>
+At the console, enter the following commands to locate the ApiClient record for your Workbench installation (typically, while you're setting this up, the @last@ one in the database is the one you want), then set the @is_trusted@ flag for the appropriate client record:
+
+<notextile><pre><code>irb(main):001:0&gt; <span class="userinput">wb = ApiClient.all.last; [wb.url_prefix, wb.created_at]</span>
 =&gt; ["https://workbench.example.com/", Sat, 19 Apr 2014 03:35:12 UTC +00:00]
 irb(main):002:0&gt; <span class="userinput">include CurrentApiClient</span>
 =&gt; true
@@ -191,11 +197,12 @@ irb(main):003:0&gt; <span class="userinput">act_as_system_user do wb.update_attr
 
 h2(#admin-user). Add an admin user
 
-Next, we're going to use the rails console on the <strong>API server</strong> to activate our own account and give yourself admin privileges:
+Next, we're going to use the Rails console on the <strong>API server</strong> to activate your account and give yourself admin privileges.  {% include 'install_rails_command' %}
+
+Enter the following commands at the console:
 
 <notextile>
-<pre><code>/var/www/arvados-api/current$ <span class="userinput">RAILS_ENV=production bundle exec rails console</span>
-irb(main):001:0&gt; <span class="userinput">Thread.current[:user] = User.all.select(&:identity_url).last</span>
+<pre><code>irb(main):001:0&gt; <span class="userinput">Thread.current[:user] = User.all.select(&:identity_url).last</span>
 irb(main):002:0&gt; <span class="userinput">Thread.current[:user].update_attributes is_admin: true, is_active: true</span>
 irb(main):003:0&gt; <span class="userinput">User.where(is_admin: true).collect &:email</span>
 =&gt; ["root", "<b>your_address@example.com</b>"]

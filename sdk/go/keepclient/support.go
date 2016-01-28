@@ -7,14 +7,19 @@ import (
 	"git.curoverse.com/arvados.git/sdk/go/streamer"
 	"io"
 	"io/ioutil"
-	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 )
 
-type keepDisk struct {
+// Function used to emit debug messages. The easiest way to enable
+// keepclient debug messages in your application is to assign
+// log.Printf to DebugPrintf.
+var DebugPrintf = func(string, ...interface{}) {}
+
+type keepService struct {
 	Uuid     string `json:"uuid"`
 	Hostname string `json:"service_host"`
 	Port     int    `json:"service_port"`
@@ -23,13 +28,14 @@ type keepDisk struct {
 	ReadOnly bool   `json:"read_only"`
 }
 
+// Md5String returns md5 hash for the bytes in the given string
 func Md5String(s string) string {
 	return fmt.Sprintf("%x", md5.Sum([]byte(s)))
 }
 
-// Set timeouts apply when connecting to keepproxy services (assumed to be over
-// the Internet).
-func (this *KeepClient) setClientSettingsProxy() {
+// Set timeouts applicable when connecting to non-disk services
+// (assumed to be over the Internet).
+func (this *KeepClient) setClientSettingsNonDisk() {
 	if this.Client.Timeout == 0 {
 		// Maximum time to wait for a complete response
 		this.Client.Timeout = 300 * time.Second
@@ -49,12 +55,11 @@ func (this *KeepClient) setClientSettingsProxy() {
 			TLSHandshakeTimeout: 10 * time.Second,
 		}
 	}
-
 }
 
-// Set timeouts apply when connecting to keepstore services directly (assumed
-// to be on the local network).
-func (this *KeepClient) setClientSettingsStore() {
+// Set timeouts applicable when connecting to keepstore services directly
+// (assumed to be on the local network).
+func (this *KeepClient) setClientSettingsDisk() {
 	if this.Client.Timeout == 0 {
 		// Maximum time to wait for a complete response
 		this.Client.Timeout = 20 * time.Second
@@ -76,66 +81,8 @@ func (this *KeepClient) setClientSettingsStore() {
 	}
 }
 
-func (this *KeepClient) DiscoverKeepServers() error {
-	type svcList struct {
-		Items []keepDisk `json:"items"`
-	}
-	var m svcList
-
-	err := this.Arvados.Call("GET", "keep_services", "", "accessible", nil, &m)
-
-	if err != nil {
-		if err := this.Arvados.List("keep_disks", nil, &m); err != nil {
-			return err
-		}
-	}
-
-	listed := make(map[string]bool)
-	localRoots := make(map[string]string)
-	gatewayRoots := make(map[string]string)
-	writableLocalRoots := make(map[string]string)
-
-	for _, service := range m.Items {
-		scheme := "http"
-		if service.SSL {
-			scheme = "https"
-		}
-		url := fmt.Sprintf("%s://%s:%d", scheme, service.Hostname, service.Port)
-
-		// Skip duplicates
-		if listed[url] {
-			continue
-		}
-		listed[url] = true
-
-		switch service.SvcType {
-		case "disk":
-			localRoots[service.Uuid] = url
-		case "proxy":
-			localRoots[service.Uuid] = url
-			this.Using_proxy = true
-		}
-
-		if service.ReadOnly == false {
-			writableLocalRoots[service.Uuid] = url
-		}
-
-		// Gateway services are only used when specified by
-		// UUID, so there's nothing to gain by filtering them
-		// by service type. Including all accessible services
-		// (gateway and otherwise) merely accommodates more
-		// service configurations.
-		gatewayRoots[service.Uuid] = url
-	}
-
-	if this.Using_proxy {
-		this.setClientSettingsProxy()
-	} else {
-		this.setClientSettingsStore()
-	}
-
-	this.SetServiceRoots(localRoots, writableLocalRoots, gatewayRoots)
-	return nil
+type svcList struct {
+	Items []keepService `json:"items"`
 }
 
 type uploadStatus struct {
@@ -146,14 +93,14 @@ type uploadStatus struct {
 	response        string
 }
 
-func (this KeepClient) uploadToKeepServer(host string, hash string, body io.ReadCloser,
-	upload_status chan<- uploadStatus, expectedLength int64, requestId string) {
+func (this *KeepClient) uploadToKeepServer(host string, hash string, body io.ReadCloser,
+	upload_status chan<- uploadStatus, expectedLength int64, requestID int32) {
 
 	var req *http.Request
 	var err error
 	var url = fmt.Sprintf("%s/%s", host, hash)
 	if req, err = http.NewRequest("PUT", url, nil); err != nil {
-		log.Printf("[%v] Error creating request PUT %v error: %v", requestId, url, err.Error())
+		DebugPrintf("DEBUG: [%08x] Error creating request PUT %v error: %v", requestID, url, err.Error())
 		upload_status <- uploadStatus{err, url, 0, 0, ""}
 		body.Close()
 		return
@@ -174,14 +121,11 @@ func (this KeepClient) uploadToKeepServer(host string, hash string, body io.Read
 
 	req.Header.Add("Authorization", fmt.Sprintf("OAuth2 %s", this.Arvados.ApiToken))
 	req.Header.Add("Content-Type", "application/octet-stream")
-
-	if this.Using_proxy {
-		req.Header.Add(X_Keep_Desired_Replicas, fmt.Sprint(this.Want_replicas))
-	}
+	req.Header.Add(X_Keep_Desired_Replicas, fmt.Sprint(this.Want_replicas))
 
 	var resp *http.Response
 	if resp, err = this.Client.Do(req); err != nil {
-		log.Printf("[%v] Upload failed %v error: %v", requestId, url, err.Error())
+		DebugPrintf("DEBUG: [%08x] Upload failed %v error: %v", requestID, url, err.Error())
 		upload_status <- uploadStatus{err, url, 0, 0, ""}
 		return
 	}
@@ -194,28 +138,28 @@ func (this KeepClient) uploadToKeepServer(host string, hash string, body io.Read
 	defer resp.Body.Close()
 	defer io.Copy(ioutil.Discard, resp.Body)
 
-	respbody, err2 := ioutil.ReadAll(&io.LimitedReader{resp.Body, 4096})
+	respbody, err2 := ioutil.ReadAll(&io.LimitedReader{R: resp.Body, N: 4096})
 	response := strings.TrimSpace(string(respbody))
 	if err2 != nil && err2 != io.EOF {
-		log.Printf("[%v] Upload %v error: %v response: %v", requestId, url, err2.Error(), response)
+		DebugPrintf("DEBUG: [%08x] Upload %v error: %v response: %v", requestID, url, err2.Error(), response)
 		upload_status <- uploadStatus{err2, url, resp.StatusCode, rep, response}
 	} else if resp.StatusCode == http.StatusOK {
-		log.Printf("[%v] Upload %v success", requestId, url)
+		DebugPrintf("DEBUG: [%08x] Upload %v success", requestID, url)
 		upload_status <- uploadStatus{nil, url, resp.StatusCode, rep, response}
 	} else {
-		log.Printf("[%v] Upload %v error: %v response: %v", requestId, url, resp.StatusCode, response)
+		DebugPrintf("DEBUG: [%08x] Upload %v error: %v response: %v", requestID, url, resp.StatusCode, response)
 		upload_status <- uploadStatus{errors.New(resp.Status), url, resp.StatusCode, rep, response}
 	}
 }
 
-func (this KeepClient) putReplicas(
+func (this *KeepClient) putReplicas(
 	hash string,
 	tr *streamer.AsyncStream,
 	expectedLength int64) (locator string, replicas int, err error) {
 
-	// Take the hash of locator and timestamp in order to identify this
-	// specific transaction in log statements.
-	requestId := fmt.Sprintf("%x", md5.Sum([]byte(locator+time.Now().String())))[0:8]
+	// Generate an arbitrary ID to identify this specific
+	// transaction in debug logs.
+	requestID := rand.Int31()
 
 	// Calculate the ordering for uploading to servers
 	sv := NewRootSorter(this.WritableLocalRoots(), hash).GetSortedRoots()
@@ -228,39 +172,74 @@ func (this KeepClient) putReplicas(
 
 	// Used to communicate status from the upload goroutines
 	upload_status := make(chan uploadStatus)
-	defer close(upload_status)
+	defer func() {
+		// Wait for any abandoned uploads (e.g., we started
+		// two uploads and the first replied with replicas=2)
+		// to finish before closing the status channel.
+		go func() {
+			for active > 0 {
+				<-upload_status
+			}
+			close(upload_status)
+		}()
+	}()
 
 	// Desired number of replicas
 	remaining_replicas := this.Want_replicas
 
-	for remaining_replicas > 0 {
-		for active < remaining_replicas {
-			// Start some upload requests
-			if next_server < len(sv) {
-				log.Printf("[%v] Begin upload %s to %s", requestId, hash, sv[next_server])
-				go this.uploadToKeepServer(sv[next_server], hash, tr.MakeStreamReader(), upload_status, expectedLength, requestId)
-				next_server += 1
-				active += 1
-			} else {
-				if active == 0 {
-					return locator, (this.Want_replicas - remaining_replicas), InsufficientReplicasError
+	replicasPerThread := this.replicasPerService
+	if replicasPerThread < 1 {
+		// unlimited or unknown
+		replicasPerThread = remaining_replicas
+	}
+
+	retriesRemaining := 1 + this.Retries
+	var retryServers []string
+
+	for retriesRemaining > 0 {
+		retriesRemaining -= 1
+		next_server = 0
+		retryServers = []string{}
+		for remaining_replicas > 0 {
+			for active*replicasPerThread < remaining_replicas {
+				// Start some upload requests
+				if next_server < len(sv) {
+					DebugPrintf("DEBUG: [%08x] Begin upload %s to %s", requestID, hash, sv[next_server])
+					go this.uploadToKeepServer(sv[next_server], hash, tr.MakeStreamReader(), upload_status, expectedLength, requestID)
+					next_server += 1
+					active += 1
 				} else {
-					break
+					if active == 0 && retriesRemaining == 0 {
+						return locator, (this.Want_replicas - remaining_replicas), InsufficientReplicasError
+					} else {
+						break
+					}
 				}
 			}
-		}
-		log.Printf("[%v] Replicas remaining to write: %v active uploads: %v",
-			requestId, remaining_replicas, active)
+			DebugPrintf("DEBUG: [%08x] Replicas remaining to write: %v active uploads: %v",
+				requestID, remaining_replicas, active)
 
-		// Now wait for something to happen.
-		status := <-upload_status
-		active -= 1
+			// Now wait for something to happen.
+			if active > 0 {
+				status := <-upload_status
+				active -= 1
 
-		if status.statusCode == 200 {
-			// good news!
-			remaining_replicas -= status.replicas_stored
-			locator = status.response
+				if status.statusCode == 200 {
+					// good news!
+					remaining_replicas -= status.replicas_stored
+					locator = status.response
+				} else if status.statusCode == 0 || status.statusCode == 408 || status.statusCode == 429 ||
+					(status.statusCode >= 500 && status.statusCode != 503) {
+					// Timeout, too many requests, or other server side failure
+					// Do not retry when status code is 503, which means the keep server is full
+					retryServers = append(retryServers, status.url[0:strings.LastIndex(status.url, "/")])
+				}
+			} else {
+				break
+			}
 		}
+
+		sv = retryServers
 	}
 
 	return locator, this.Want_replicas, nil

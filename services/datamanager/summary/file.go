@@ -9,7 +9,6 @@ import (
 	"git.curoverse.com/arvados.git/sdk/go/logger"
 	"git.curoverse.com/arvados.git/services/datamanager/collection"
 	"git.curoverse.com/arvados.git/services/datamanager/keep"
-	"git.curoverse.com/arvados.git/services/datamanager/loggerutil"
 	"log"
 	"os"
 )
@@ -22,16 +21,17 @@ type serializedData struct {
 }
 
 var (
-	writeDataTo  string
+	WriteDataTo  string
 	readDataFrom string
 )
 
+// DataFetcher to fetch data from keep servers
 type DataFetcher func(arvLogger *logger.Logger,
 	readCollections *collection.ReadCollections,
-	keepServerInfo *keep.ReadServers)
+	keepServerInfo *keep.ReadServers) error
 
 func init() {
-	flag.StringVar(&writeDataTo,
+	flag.StringVar(&WriteDataTo,
 		"write-data-to",
 		"",
 		"Write summary of data received to this file. Used for development only.")
@@ -41,7 +41,7 @@ func init() {
 		"Avoid network i/o and read summary data from this file instead. Used for development only.")
 }
 
-// Writes data we've read to a file.
+// MaybeWriteData writes data we've read to a file.
 //
 // This is useful for development, so that we don't need to read all
 // our data from the network every time we tweak something.
@@ -50,36 +50,34 @@ func init() {
 // working with stale data.
 func MaybeWriteData(arvLogger *logger.Logger,
 	readCollections collection.ReadCollections,
-	keepServerInfo keep.ReadServers) bool {
-	if writeDataTo == "" {
-		return false
-	} else {
-		summaryFile, err := os.Create(writeDataTo)
-		if err != nil {
-			loggerutil.FatalWithMessage(arvLogger,
-				fmt.Sprintf("Failed to open %s: %v", writeDataTo, err))
-		}
-		defer summaryFile.Close()
-
-		enc := gob.NewEncoder(summaryFile)
-		data := serializedData{
-			ReadCollections: readCollections,
-			KeepServerInfo:  keepServerInfo}
-		err = enc.Encode(data)
-		if err != nil {
-			loggerutil.FatalWithMessage(arvLogger,
-				fmt.Sprintf("Failed to write summary data: %v", err))
-		}
-		log.Printf("Wrote summary data to: %s", writeDataTo)
-		return true
+	keepServerInfo keep.ReadServers) error {
+	if WriteDataTo == "" {
+		return nil
 	}
+	summaryFile, err := os.Create(WriteDataTo)
+	if err != nil {
+		return err
+	}
+	defer summaryFile.Close()
+
+	enc := gob.NewEncoder(summaryFile)
+	data := serializedData{
+		ReadCollections: readCollections,
+		KeepServerInfo:  keepServerInfo}
+	err = enc.Encode(data)
+	if err != nil {
+		return err
+	}
+	log.Printf("Wrote summary data to: %s", WriteDataTo)
+	return nil
 }
 
+// ShouldReadData should not be used outside of development
 func ShouldReadData() bool {
 	return readDataFrom != ""
 }
 
-// Reads data that we've written to a file.
+// ReadData reads data that we've written to a file.
 //
 // This is useful for development, so that we don't need to read all
 // our data from the network every time we tweak something.
@@ -88,33 +86,30 @@ func ShouldReadData() bool {
 // working with stale data.
 func ReadData(arvLogger *logger.Logger,
 	readCollections *collection.ReadCollections,
-	keepServerInfo *keep.ReadServers) {
+	keepServerInfo *keep.ReadServers) error {
 	if readDataFrom == "" {
-		loggerutil.FatalWithMessage(arvLogger,
-			"ReadData() called with empty filename.")
-	} else {
-		summaryFile, err := os.Open(readDataFrom)
-		if err != nil {
-			loggerutil.FatalWithMessage(arvLogger,
-				fmt.Sprintf("Failed to open %s: %v", readDataFrom, err))
-		}
-		defer summaryFile.Close()
-
-		dec := gob.NewDecoder(summaryFile)
-		data := serializedData{}
-		err = dec.Decode(&data)
-		if err != nil {
-			loggerutil.FatalWithMessage(arvLogger,
-				fmt.Sprintf("Failed to read summary data: %v", err))
-		}
-
-		// re-summarize data, so that we can update our summarizing
-		// functions without needing to do all our network i/o
-		data.ReadCollections.Summarize(arvLogger)
-		data.KeepServerInfo.Summarize(arvLogger)
-
-		*readCollections = data.ReadCollections
-		*keepServerInfo = data.KeepServerInfo
-		log.Printf("Read summary data from: %s", readDataFrom)
+		return fmt.Errorf("ReadData() called with empty filename.")
 	}
+	summaryFile, err := os.Open(readDataFrom)
+	if err != nil {
+		return err
+	}
+	defer summaryFile.Close()
+
+	dec := gob.NewDecoder(summaryFile)
+	data := serializedData{}
+	err = dec.Decode(&data)
+	if err != nil {
+		return err
+	}
+
+	// re-summarize data, so that we can update our summarizing
+	// functions without needing to do all our network i/o
+	data.ReadCollections.Summarize(arvLogger)
+	data.KeepServerInfo.Summarize(arvLogger)
+
+	*readCollections = data.ReadCollections
+	*keepServerInfo = data.KeepServerInfo
+	log.Printf("Read summary data from: %s", readDataFrom)
+	return nil
 }

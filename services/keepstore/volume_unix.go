@@ -1,7 +1,9 @@
 package main
 
 import (
-	"bytes"
+	"bufio"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -16,6 +18,100 @@ import (
 	"time"
 )
 
+type unixVolumeAdder struct {
+	*volumeSet
+}
+
+func (vs *unixVolumeAdder) Set(value string) error {
+	if trashLifetime != 0 {
+		return ErrNotImplemented
+	}
+	if dirs := strings.Split(value, ","); len(dirs) > 1 {
+		log.Print("DEPRECATED: using comma-separated volume list.")
+		for _, dir := range dirs {
+			if err := vs.Set(dir); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(value) == 0 || value[0] != '/' {
+		return errors.New("Invalid volume: must begin with '/'.")
+	}
+	if _, err := os.Stat(value); err != nil {
+		return err
+	}
+	var locker sync.Locker
+	if flagSerializeIO {
+		locker = &sync.Mutex{}
+	}
+	*vs.volumeSet = append(*vs.volumeSet, &UnixVolume{
+		root:     value,
+		locker:   locker,
+		readonly: flagReadonly,
+	})
+	return nil
+}
+
+func init() {
+	flag.Var(
+		&unixVolumeAdder{&volumes},
+		"volumes",
+		"Deprecated synonym for -volume.")
+	flag.Var(
+		&unixVolumeAdder{&volumes},
+		"volume",
+		"Local storage directory. Can be given more than once to add multiple directories. If none are supplied, the default is to use all directories named \"keep\" that exist in the top level directory of a mount point at startup time. Can be a comma-separated list, but this is deprecated: use multiple -volume arguments instead.")
+}
+
+// Discover adds a UnixVolume for every directory named "keep" that is
+// located at the top level of a device- or tmpfs-backed mount point
+// other than "/". It returns the number of volumes added.
+func (vs *unixVolumeAdder) Discover() int {
+	added := 0
+	f, err := os.Open(ProcMounts)
+	if err != nil {
+		log.Fatalf("opening %s: %s", ProcMounts, err)
+	}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		args := strings.Fields(scanner.Text())
+		if err := scanner.Err(); err != nil {
+			log.Fatalf("reading %s: %s", ProcMounts, err)
+		}
+		dev, mount := args[0], args[1]
+		if mount == "/" {
+			continue
+		}
+		if dev != "tmpfs" && !strings.HasPrefix(dev, "/dev/") {
+			continue
+		}
+		keepdir := mount + "/keep"
+		if st, err := os.Stat(keepdir); err != nil || !st.IsDir() {
+			continue
+		}
+		// Set the -readonly flag (but only for this volume)
+		// if the filesystem is mounted readonly.
+		flagReadonlyWas := flagReadonly
+		for _, fsopt := range strings.Split(args[3], ",") {
+			if fsopt == "ro" {
+				flagReadonly = true
+				break
+			}
+			if fsopt == "rw" {
+				break
+			}
+		}
+		if err := vs.Set(keepdir); err != nil {
+			log.Printf("adding %q: %s", keepdir, err)
+		} else {
+			added++
+		}
+		flagReadonly = flagReadonlyWas
+	}
+	return added
+}
+
 // A UnixVolume stores and retrieves blocks in a local directory.
 type UnixVolume struct {
 	// path to the volume's root directory
@@ -26,6 +122,7 @@ type UnixVolume struct {
 	readonly bool
 }
 
+// Touch sets the timestamp for the given locator to the current time
 func (v *UnixVolume) Touch(loc string) error {
 	if v.readonly {
 		return MethodDisabledError
@@ -49,13 +146,14 @@ func (v *UnixVolume) Touch(loc string) error {
 	return syscall.Utime(p, &utime)
 }
 
+// Mtime returns the stored timestamp for the given locator.
 func (v *UnixVolume) Mtime(loc string) (time.Time, error) {
 	p := v.blockPath(loc)
-	if fi, err := os.Stat(p); err != nil {
+	fi, err := os.Stat(p)
+	if err != nil {
 		return time.Time{}, err
-	} else {
-		return fi.ModTime(), nil
 	}
+	return fi.ModTime(), nil
 }
 
 // Lock the locker (if one is in use), open the file for reading, and
@@ -79,7 +177,7 @@ func (v *UnixVolume) stat(path string) (os.FileInfo, error) {
 	if err == nil {
 		if stat.Size() < 0 {
 			err = os.ErrInvalid
-		} else if stat.Size() > BLOCKSIZE {
+		} else if stat.Size() > BlockSize {
 			err = TooLongError
 		}
 	}
@@ -94,7 +192,7 @@ func (v *UnixVolume) Get(loc string) ([]byte, error) {
 	path := v.blockPath(loc)
 	stat, err := v.stat(path)
 	if err != nil {
-		return nil, err
+		return nil, v.translateError(err)
 	}
 	buf := bufs.Get(int(stat.Size()))
 	err = v.getFunc(path, func(rdr io.Reader) error {
@@ -113,36 +211,11 @@ func (v *UnixVolume) Get(loc string) ([]byte, error) {
 // bytes.Compare(), but uses less memory.
 func (v *UnixVolume) Compare(loc string, expect []byte) error {
 	path := v.blockPath(loc)
-	stat, err := v.stat(path)
-	if err != nil {
-		return err
+	if _, err := v.stat(path); err != nil {
+		return v.translateError(err)
 	}
-	bufLen := 1 << 20
-	if int64(bufLen) > stat.Size() {
-		bufLen = int(stat.Size())
-	}
-	cmp := expect
-	buf := make([]byte, bufLen)
 	return v.getFunc(path, func(rdr io.Reader) error {
-		// Loop invariants: all data read so far matched what
-		// we expected, and the first N bytes of cmp are
-		// expected to equal the next N bytes read from
-		// reader.
-		for {
-			n, err := rdr.Read(buf)
-			if n > len(cmp) || bytes.Compare(cmp[:n], buf[:n]) != 0 {
-				return collisionOrCorrupt(loc[:32], expect[:len(expect)-len(cmp)], buf[:n], rdr)
-			}
-			cmp = cmp[n:]
-			if err == io.EOF {
-				if len(cmp) != 0 {
-					return collisionOrCorrupt(loc[:32], expect[:len(expect)-len(cmp)], nil, nil)
-				}
-				return nil
-			} else if err != nil {
-				return err
-			}
-		}
+		return compareReaderWithBuf(rdr, expect, loc[:32])
 	})
 }
 
@@ -222,6 +295,7 @@ func (v *UnixVolume) Status() *VolumeStatus {
 }
 
 var blockDirRe = regexp.MustCompile(`^[0-9a-f]+$`)
+var blockFileRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // IndexTo writes (to the given Writer) a list of blocks found on this
 // volume which begin with the specified prefix. If the prefix is an
@@ -278,6 +352,9 @@ func (v *UnixVolume) IndexTo(prefix string, w io.Writer) error {
 			if !strings.HasPrefix(name, prefix) {
 				continue
 			}
+			if !blockFileRe.MatchString(name) {
+				continue
+			}
 			_, err = fmt.Fprint(w,
 				name,
 				"+", fileInfo[0].Size(),
@@ -288,7 +365,8 @@ func (v *UnixVolume) IndexTo(prefix string, w io.Writer) error {
 	}
 }
 
-func (v *UnixVolume) Delete(loc string) error {
+// Delete deletes the block data from the unix storage
+func (v *UnixVolume) Trash(loc string) error {
 	// Touch() must be called before calling Write() on a block.  Touch()
 	// also uses lockfile().  This avoids a race condition between Write()
 	// and Delete() because either (a) the file will be deleted and Touch()
@@ -299,6 +377,9 @@ func (v *UnixVolume) Delete(loc string) error {
 
 	if v.readonly {
 		return MethodDisabledError
+	}
+	if trashLifetime != 0 {
+		return ErrNotImplemented
 	}
 	if v.locker != nil {
 		v.locker.Lock()
@@ -315,7 +396,7 @@ func (v *UnixVolume) Delete(loc string) error {
 	}
 	defer unlockfile(f)
 
-	// If the block has been PUT in the last blob_signature_ttl
+	// If the block has been PUT in the last blobSignatureTTL
 	// seconds, return success without removing the block. This
 	// protects data from garbage collection until it is no longer
 	// possible for clients to retrieve the unreferenced blocks
@@ -323,11 +404,17 @@ func (v *UnixVolume) Delete(loc string) error {
 	if fi, err := os.Stat(p); err != nil {
 		return err
 	} else {
-		if time.Since(fi.ModTime()) < blob_signature_ttl {
+		if time.Since(fi.ModTime()) < blobSignatureTTL {
 			return nil
 		}
 	}
 	return os.Remove(p)
+}
+
+// Untrash moves block from trash back into store
+// TBD
+func (v *UnixVolume) Untrash(loc string) error {
+	return ErrNotImplemented
 }
 
 // blockDir returns the fully qualified directory name for the directory
@@ -343,7 +430,7 @@ func (v *UnixVolume) blockPath(loc string) string {
 }
 
 // IsFull returns true if the free space on the volume is less than
-// MIN_FREE_KILOBYTES.
+// MinFreeKilobytes.
 //
 func (v *UnixVolume) IsFull() (isFull bool) {
 	fullSymlink := v.root + "/full"
@@ -359,7 +446,7 @@ func (v *UnixVolume) IsFull() (isFull bool) {
 	}
 
 	if avail, err := v.FreeDiskSpace(); err == nil {
-		isFull = avail < MIN_FREE_KILOBYTES
+		isFull = avail < MinFreeKilobytes
 	} else {
 		log.Printf("%s: FreeDiskSpace: %s\n", v, err)
 		isFull = false
@@ -391,8 +478,13 @@ func (v *UnixVolume) String() string {
 	return fmt.Sprintf("[UnixVolume %s]", v.root)
 }
 
+// Writable returns false if all future Put, Mtime, and Delete calls are expected to fail.
 func (v *UnixVolume) Writable() bool {
 	return !v.readonly
+}
+
+func (v *UnixVolume) Replication() int {
+	return 1
 }
 
 // lockfile and unlockfile use flock(2) to manage kernel file locks.
@@ -402,4 +494,17 @@ func lockfile(f *os.File) error {
 
 func unlockfile(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+}
+
+// Where appropriate, translate a more specific filesystem error to an
+// error recognized by handlers, like os.ErrNotExist.
+func (v *UnixVolume) translateError(err error) error {
+	switch err.(type) {
+	case *os.PathError:
+		// stat() returns a PathError if the parent directory
+		// (not just the file itself) is missing
+		return os.ErrNotExist
+	default:
+		return err
+	}
 }

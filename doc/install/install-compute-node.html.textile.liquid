@@ -8,6 +8,8 @@ h2. Install dependencies
 
 First, "add the appropriate package repository for your distribution":{{ site.baseurl }}/install/install-manual-prerequisites.html#repos.
 
+{% include 'note_python27_sc' %}
+
 On Debian-based systems:
 
 <notextile>
@@ -21,8 +23,6 @@ On Red Hat-based systems:
 <pre><code>~$ <span class="userinput">sudo yum install perl python27-python-virtualenv fuse python27-python-arvados-python-client python27-python-arvados-fuse crunchstat arvados-docker-cleaner iptables ca-certificates</span>
 </code></pre>
 </notextile>
-
-{% include 'note_python27_sc' %}
 
 h2. Install Docker
 
@@ -77,6 +77,10 @@ user_allow_other
 h2. Configure the Docker cleaner
 
 The arvados-docker-cleaner program removes least recently used docker images as needed to keep disk usage below a configured limit.
+
+{% include 'notebox_begin' %}
+This also removes all containers as soon as they exit, as if they were run with `docker run --rm`. If you need to debug or inspect containers after they stop, temporarily stop arvados-docker-cleaner or run it with `--remove-stopped-containers never`.
+{% include 'notebox_end' %}
 
 On Debian-based systems, install runit:
 
@@ -148,8 +152,7 @@ if ! test -f /root/node.json ; then
 import arvados, json, socket
 fqdn = socket.getfqdn()
 hostname, _, domain = fqdn.partition('.')
-ip_address = socket.gethostbyname(fqdn)
-node = arvados.api('v1').nodes().create(body={'hostname': hostname, 'domain': domain, 'ip_address': ip_address}).execute()
+node = arvados.api('v1').nodes().create(body={'hostname': hostname, 'domain': domain}).execute()
 with open('/root/node.json', 'w') as node_file:
     json.dump(node, node_file, indent=2)
 EOF

@@ -34,7 +34,7 @@ On a Red Hat-based system, install the following packages:
 
 {% include 'install_git' %}
 
-h2. Set up the database
+h2(#configure). Set up the database
 
 Generate a new database password. Nobody ever needs to memorize it or type it, so we'll make a strong one:
 
@@ -203,7 +203,7 @@ For best performance, we recommend you use Nginx as your Web server front-end, w
 
 <notextile>
 <ol>
-<li><a href="https://www.phusionpassenger.com/documentation/Users%20guide%20Nginx.html">Install Nginx and Phusion Passenger</a>.</li>
+<li><a href="https://www.phusionpassenger.com/library/walkthroughs/deploy/ruby/ownserver/nginx/oss/install_passenger_main.html">Install Nginx and Phusion Passenger</a>.</li>
 
 <li><p>Puma is already included with the API server's gems.  We recommend you run it as a service under <a href="http://smarden.org/runit/">runit</a> or a similar tool.  Here's a sample runit script for that:</p>
 
@@ -244,6 +244,14 @@ exec chpst -m 1073741824 -u webserver-user:webserver-group -e "$envdir" \
   passenger_enabled on;
   # If you're using RVM, uncomment the line below.
   #passenger_ruby /usr/local/rvm/wrappers/default/ruby;
+
+  # This value effectively limits the size of API objects users can
+  # create, especially collections.  If you change this, you should
+  # also ensure the following settings match it:
+  # * `client_max_body_size` in the server section below
+  # * `client_max_body_size` in the Workbench Nginx configuration (twice)
+  # * `max_request_size` in the API server's application.yml file
+  client_max_body_size 128m;
 }
 
 upstream api {
@@ -277,10 +285,7 @@ server {
 
   index  index.html index.htm index.php;
 
-  # This value effectively limits the size of API objects users can create,
-  # especially collections.  If you change this, you should also set
-  # `max_request_size` in the API server's application.yml file to the same
-  # value.
+  # Refer to the comment about this setting in the server section above.
   client_max_body_size 128m;
 
   location / {
@@ -335,14 +340,12 @@ server {
 
 h2. Prepare the API server deployment
 
-Now that all your configuration is in place, run @/usr/local/bin/arvados-api-server-upgrade.sh@.  This will install and check your configuration, install necessary gems, and run any necessary database setup.
+{% assign railspkg = "arvados-api-server" %}
+{% include 'install_rails_reconfigure' %}
 
 {% include 'notebox_begin' %}
-You can safely ignore the following messages if they appear while this script runs:
+You can safely ignore the following messages if they appear while this command runs:
 <pre>Don't run Bundler as root. Bundler can ask for sudo if it is needed, and installing your bundle as root will
 break this application for all non-root users on this machine.</pre>
 <pre>fatal: Not a git repository (or any of the parent directories): .git</pre>
 {% include 'notebox_end' %}
-
-This command aborts when it encounters an error.  It's safe to rerun multiple times, so if there's a problem with your configuration, you can fix that and try again.
-
