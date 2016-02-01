@@ -1,5 +1,6 @@
 import sys
 import time
+import threading
 
 class Stat(object):
     def __init__(self, prefix, interval,
@@ -35,29 +36,43 @@ class Stat(object):
         self.ing_prev = ing
 
 
-def statlogger(interval, keep, ops):
-    calls = Stat("keepcalls", interval, "put", "get",
-                 keep.put_counter.get,
-                 keep.get_counter.get)
-    net = Stat("net:keep0", interval, "tx", "rx",
-               keep.upload_counter.get,
-               keep.download_counter.get)
-    cache = Stat("keepcache", interval, "hit", "miss",
-               keep.hits_counter.get,
-               keep.misses_counter.get)
-    fuseops = Stat("fuseops", interval,"write", "read",
-                   ops.write_ops_counter.get,
-                   ops.read_ops_counter.get)
-    blk = Stat("blkio:0:0", interval, "write", "read",
-               ops.write_counter.get,
-               ops.read_counter.get)
+class StatLogger(threading.Thread):
+    def __init__(self, interval, keep, ops):
+        super(StatLogger, self).__init__()
+        self._stop = threading.Event()
+        self.name = "statlogger"
+        self.interval = interval
+        self.keep = keep
+        self.ops = ops
 
-    while True:
-        time.sleep(interval)
-        calls.update()
-        net.update()
-        cache.update()
-        fuseops.update()
-        blk.update()
+    def stop(self):
+        self._stop.set()
 
+    def keep_running(self):
+        return not self._stop.isSet()
+
+    def run(self):
+        calls = Stat("keepcalls", self.interval, "put", "get",
+                     self.keep.put_counter.get,
+                     self.keep.get_counter.get)
+        net = Stat("net:keep0", self.interval, "tx", "rx",
+                   self.keep.upload_counter.get,
+                   self.keep.download_counter.get)
+        cache = Stat("keepcache", self.interval, "hit", "miss",
+                   self.keep.hits_counter.get,
+                   self.keep.misses_counter.get)
+        fuseops = Stat("fuseops", self.interval,"write", "read",
+                       self.ops.write_ops_counter.get,
+                       self.ops.read_ops_counter.get)
+        blk = Stat("blkio:0:0", self.interval, "write", "read",
+                   self.ops.write_counter.get,
+                   self.ops.read_counter.get)
+
+        while self.keep_running():
+            time.sleep(self.interval)
+            calls.update()
+            net.update()
+            cache.update()
+            fuseops.update()
+            blk.update()
 

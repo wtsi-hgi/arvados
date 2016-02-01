@@ -74,7 +74,7 @@ import Queue
 # unlimited to avoid deadlocks, see https://arvados.org/issues/3198#note-43 for
 # details.
 
-llfuse.capi._notify_queue = Queue.Queue()
+#llfuse.capi._notify_queue = Queue.Queue()
 
 from fusedir import sanitize_filename, Directory, CollectionDirectory, TmpCollectionDirectory, MagicDirectory, TagsDirectory, ProjectDirectory, SharedDirectory, CollectionDirectoryBase
 from fusefile import StringFile, FuseArvadosFile
@@ -316,6 +316,9 @@ class Operations(llfuse.Operations):
         self.gid = gid
         self.enable_write = enable_write
 
+        self._pid_operations = {}
+        self._filehandle_ctx = {}
+
         # dict of inode to filehandle
         self._filehandles = {}
         self._filehandles_counter = itertools.count(0)
@@ -346,6 +349,11 @@ class Operations(llfuse.Operations):
 
     @catch_exceptions
     def destroy(self):
+        sys.stderr.write("arv-mount arvados_fuse.operations.destroy()\n")
+        for pid in self._pid_operations:
+            for operation in self._pid_operations[pid]:
+                count = self._pid_operations[pid][operation]
+                sys.stderr.write("arv-mount pid %s called %s %s times\n" % (pid, operation, count))
         with llfuse.lock:
             self._shutdown_started.set()
             if self.events:
@@ -355,6 +363,7 @@ class Operations(llfuse.Operations):
             self.inodes.clear()
 
     def access(self, inode, mode, ctx):
+        self._log_pid_operation("access", ctx)
         return True
 
     def listen_for_events(self):
@@ -396,9 +405,12 @@ class Operations(llfuse.Operations):
                 parent.invalidate()
                 parent.update()
 
-
     @catch_exceptions
-    def getattr(self, inode):
+    def getattr(self, inode, ctx):
+        self._log_pid_operation("getattr", ctx)
+        return self._getattr(inode)
+
+    def _getattr(self, inode):
         if inode not in self.inodes:
             raise llfuse.FUSEError(errno.ENOENT)
 
@@ -430,15 +442,16 @@ class Operations(llfuse.Operations):
 
         entry.st_blksize = 512
         entry.st_blocks = (entry.st_size/512)+1
-        entry.st_atime = int(e.atime())
-        entry.st_mtime = int(e.mtime())
-        entry.st_ctime = int(e.mtime())
+        entry.st_atime_ns = int(e.atime())
+        entry.st_mtime_ns = int(e.mtime())
+        entry.st_ctime_ns = int(e.mtime())
 
         return entry
 
     @catch_exceptions
-    def setattr(self, inode, attr):
-        entry = self.getattr(inode)
+    def setattr(self, inode, attr, ctx):
+        self._log_pid_operation("setattr", ctx)
+        entry = self._getattr(inode)
 
         e = self.inodes[inode]
 
@@ -450,7 +463,9 @@ class Operations(llfuse.Operations):
         return entry
 
     @catch_exceptions
-    def lookup(self, parent_inode, name):
+    def lookup(self, parent_inode, name, ctx):
+        self._log_pid_operation("lookup", ctx)
+
         name = unicode(name, self.inodes.encoding)
         inode = None
 
@@ -459,7 +474,6 @@ class Operations(llfuse.Operations):
         else:
             if parent_inode in self.inodes:
                 p = self.inodes[parent_inode]
-                self.inodes.touch(p)
                 if name == '..':
                     inode = p.parent_inode
                 elif isinstance(p, Directory) and name in p:
@@ -469,7 +483,7 @@ class Operations(llfuse.Operations):
             _logger.debug("arv-mount lookup: parent_inode %i name '%s' inode %i",
                       parent_inode, name, inode)
             self.inodes[inode].inc_ref()
-            return self.getattr(inode)
+            return self._getattr(inode)
         else:
             _logger.debug("arv-mount lookup: parent_inode %i name '%s' not found",
                       parent_inode, name)
@@ -486,7 +500,9 @@ class Operations(llfuse.Operations):
                 self.inodes.del_entry(ent)
 
     @catch_exceptions
-    def open(self, inode, flags):
+    def open(self, inode, flags, ctx):
+        self._log_pid_operation("open", ctx)
+
         if inode in self.inodes:
             p = self.inodes[inode]
         else:
@@ -499,16 +515,16 @@ class Operations(llfuse.Operations):
             raise llfuse.FUSEError(errno.EPERM)
 
         fh = next(self._filehandles_counter)
+        self._filehandle_ctx[fh] = ctx
         self._filehandles[fh] = FileHandle(fh, p)
         self.inodes.touch(p)
-
-        _logger.debug("arv-mount open inode %i flags %x fh %i", inode, flags, fh)
-
         return fh
 
     @catch_exceptions
     def read(self, fh, off, size):
-        _logger.debug("arv-mount read fh %i off %i size %i", fh, off, size)
+        _logger.debug("arv-mount read %i %i %i", fh, off, size)
+        self._log_pid_operation("read", self._filehandle_ctx[fh])
+
         self.read_ops_counter.add(1)
 
         if fh in self._filehandles:
@@ -526,6 +542,7 @@ class Operations(llfuse.Operations):
     @catch_exceptions
     def write(self, fh, off, buf):
         _logger.debug("arv-mount write %i %i %i", fh, off, len(buf))
+        self._log_pid_operation("write", self._filehandle_ctx[fh])
         self.write_ops_counter.add(1)
 
         if fh in self._filehandles:
@@ -545,6 +562,7 @@ class Operations(llfuse.Operations):
 
     @catch_exceptions
     def release(self, fh):
+        self._log_pid_operation("release", self._filehandle_ctx[fh])
         if fh in self._filehandles:
             try:
                 self._filehandles[fh].flush()
@@ -556,11 +574,13 @@ class Operations(llfuse.Operations):
         self.inodes.inode_cache.cap_cache()
 
     def releasedir(self, fh):
+        self._log_pid_operation("releasedir", self._filehandle_ctx[fh])
         self.release(fh)
 
     @catch_exceptions
-    def opendir(self, inode):
+    def opendir(self, inode, ctx):
         _logger.debug("arv-mount opendir: inode %i", inode)
+        self._log_pid_operation("opendir", ctx)
 
         if inode in self.inodes:
             p = self.inodes[inode]
@@ -571,6 +591,7 @@ class Operations(llfuse.Operations):
             raise llfuse.FUSEError(errno.ENOTDIR)
 
         fh = next(self._filehandles_counter)
+        self._filehandle_ctx[fh] = ctx
         if p.parent_inode in self.inodes:
             parent = self.inodes[p.parent_inode]
         else:
@@ -585,20 +606,25 @@ class Operations(llfuse.Operations):
     @catch_exceptions
     def readdir(self, fh, off):
         _logger.debug("arv-mount readdir: fh %i off %i", fh, off)
+        self._log_pid_operation("readdir", self._filehandle_ctx[fh])
 
         if fh in self._filehandles:
             handle = self._filehandles[fh]
         else:
             raise llfuse.FUSEError(errno.EBADF)
 
+        _logger.debug("arv-mount handle.dirobj %s", handle.obj)
+
         e = off
         while e < len(handle.entries):
             if handle.entries[e][1].inode in self.inodes:
-                yield (handle.entries[e][0].encode(self.inodes.encoding), self.getattr(handle.entries[e][1].inode), e+1)
+                yield (handle.entries[e][0].encode(self.inodes.encoding), self._getattr(handle.entries[e][1].inode), e+1)
             e += 1
 
     @catch_exceptions
-    def statfs(self):
+    def statfs(self, ctx):
+        self._log_pid_operation("statfs", ctx)
+
         st = llfuse.StatvfsData()
         st.f_bsize = 128 * 1024
         st.f_blocks = 0
@@ -630,9 +656,17 @@ class Operations(llfuse.Operations):
 
         return p
 
+    def _log_pid_operation(self, operation, ctx):
+        if not ctx.pid in self._pid_operations:
+            self._pid_operations[ctx.pid] = dict()
+        if not operation in self._pid_operations[ctx.pid]:
+            self._pid_operations[ctx.pid][operation] = 0
+        self._pid_operations[ctx.pid][operation] += 1
+
     @catch_exceptions
     def create(self, inode_parent, name, mode, flags, ctx):
         _logger.debug("arv-mount create: %i '%s' %o", inode_parent, name, mode)
+        self._log_pid_operation("current", ctx)
 
         p = self._check_writable(inode_parent)
         p.create(name)
@@ -644,11 +678,12 @@ class Operations(llfuse.Operations):
         self.inodes.touch(p)
 
         f.inc_ref()
-        return (fh, self.getattr(f.inode))
+        return (fh, self._getattr(f.inode))
 
     @catch_exceptions
     def mkdir(self, inode_parent, name, mode, ctx):
         _logger.debug("arv-mount mkdir: %i '%s' %o", inode_parent, name, mode)
+        self._log_pid_operation("mkdir", ctx)
 
         p = self._check_writable(inode_parent)
         p.mkdir(name)
@@ -657,34 +692,43 @@ class Operations(llfuse.Operations):
         d = p[name]
 
         d.inc_ref()
-        return self.getattr(d.inode)
+        return self._getattr(d.inode)
 
     @catch_exceptions
-    def unlink(self, inode_parent, name):
+    def unlink(self, inode_parent, name, ctx):
         _logger.debug("arv-mount unlink: %i '%s'", inode_parent, name)
+        self._log_pid_operation("unlink", ctx)
+
         p = self._check_writable(inode_parent)
         p.unlink(name)
 
     @catch_exceptions
-    def rmdir(self, inode_parent, name):
+    def rmdir(self, inode_parent, name, ctx):
         _logger.debug("arv-mount rmdir: %i '%s'", inode_parent, name)
+        self._log_pid_operation("rmdir", ctx)
+
         p = self._check_writable(inode_parent)
         p.rmdir(name)
 
     @catch_exceptions
-    def rename(self, inode_parent_old, name_old, inode_parent_new, name_new):
+    def rename(self, inode_parent_old, name_old, inode_parent_new, name_new, ctx):
         _logger.debug("arv-mount rename: %i '%s' %i '%s'", inode_parent_old, name_old, inode_parent_new, name_new)
+        self._log_pid_operation("rename", ctx)
+
         src = self._check_writable(inode_parent_old)
         dest = self._check_writable(inode_parent_new)
         dest.rename(name_old, name_new, src)
 
     @catch_exceptions
     def flush(self, fh):
+        self._log_pid_operation("flush", self._filehandle_ctx[fh])
         if fh in self._filehandles:
             self._filehandles[fh].flush()
 
     def fsync(self, fh, datasync):
+        self._log_pid_operation("fsync", self._filehandle_ctx[fh])
         self.flush(fh)
 
-    def fsyncdir(self, fh, datasync):
+    def fsyncdir(self, fh, datasync): 
+        self._log_pid_operation("fsyncdir", self._filehandle_ctx[fh])
         self.flush(fh)

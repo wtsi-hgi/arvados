@@ -7,6 +7,7 @@ import os
 import resource
 import signal
 import subprocess
+import threading
 import sys
 import time
 
@@ -86,6 +87,8 @@ class ArgumentParser(argparse.ArgumentParser):
                             dest="exec_args", metavar=('command', 'args', '...', '--'),
                             help="""Mount, run a command, then unmount and exit""")
 
+        self._fuse_thread = None
+            
 
 class Mount(object):
     def __init__(self, args, logger=logging.getLogger('arvados.arv-mount')):
@@ -108,13 +111,20 @@ class Mount(object):
         llfuse.init(self.operations, self.args.mountpoint, self._fuse_options())
         if self.args.mode != 'by_pdh':
             self.operations.listen_for_events()
-        t = threading.Thread(None, lambda: llfuse.main())
-        t.start()
+        self._fuse_thread = threading.Thread(None, lambda: llfuse.main())
+        self._fuse_thread.name = "llfuse.main()"
+        self._fuse_thread.start()
         self.operations.initlock.wait()
 
     def __exit__(self, exc_type, exc_value, traceback):
-        subprocess.call(["fusermount", "-u", "-z", self.args.mountpoint])
-        self.operations.destroy()
+        self._unmount()
+
+    def _unmount(self):
+        #sys.stderr.write("arv-mount: calling fusermount -u -z %s\n" % self.args.mountpoint)
+        #subprocess.call(["fusermount", "-u", "-z", self.args.mountpoint])
+        #self.operations.destroy()
+        sys.stderr.write("arv-mount: _unmount calling llfuse.close()\n")
+        llfuse.close(unmount=True)
 
     def run(self):
         if self.args.exec_args:
@@ -151,8 +161,7 @@ class Mount(object):
         self.api = arvados.safeapi.ThreadSafeApiCache(
             apiconfig=arvados.config.settings(),
             keep_params={
-                'block_cache': arvados.keep.KeepBlockCache(self.args.file_cache),
-                'num_retries': self.args.retries,
+                "block_cache": arvados.keep.KeepBlockCache(self.args.file_cache)
             })
         # Do a sanity check that we have a working arvados host + token.
         self.api.users().current().execute()
@@ -167,13 +176,10 @@ class Mount(object):
             enable_write=self.args.enable_write)
 
         if self.args.crunchstat_interval:
-            statsthread = threading.Thread(
-                target=crunchstat.statlogger,
-                args=(self.args.crunchstat_interval,
-                      self.api.keep,
-                      self.operations))
-            statsthread.daemon = True
-            statsthread.start()
+            self._statsthread = crunchstat.StatLogger(self.args.crunchstat_interval,
+                                                      self.api.keep,
+                                                      self.operations)
+            self._statsthread.start()
 
         usr = self.api.users().current().execute(num_retries=self.args.retries)
         now = time.time()
@@ -276,6 +282,18 @@ From here, the following directories are available:
 
 '''.format(api_host, user_email)
 
+    def _fuse_main(self):
+        sys.stderr.write("arv-mount: _fuse_main()\n")
+        try:
+            llfuse.main()
+        except:
+            sys.stderr.write("arv-mount: _fuse_main() got exception\n")
+            llfuse.close(unmount=False)
+            raise
+        sys.stderr.write("arv-mount: _fuse_main() back from llfuse.main() and about to llfuse.close()\n")
+        llfuse.close()
+        sys.stderr.write("arv-mount: _fuse_main() back from llfuse.close()\n")
+
     def _run_exec(self):
         # Initialize the fuse connection
         llfuse.init(self.operations, self.args.mountpoint, self._fuse_options())
@@ -284,8 +302,9 @@ From here, the following directories are available:
         if self.args.mode != 'by_pdh':
             self.operations.listen_for_events()
 
-        t = threading.Thread(None, lambda: llfuse.main())
-        t.start()
+        self._fuse_thread = threading.Thread(target=self._fuse_main)
+        self._fuse_thread.name = "_fuse_main"
+        self._fuse_thread.start()
 
         # wait until the driver is finished initializing
         self.operations.initlock.wait()
@@ -301,6 +320,7 @@ From here, the following directories are available:
 
             # wait for process to complete.
             rc = sp.wait()
+            sys.stderr.write("arv-mount: returned from subprocess with returncode %s\n" % rc)
 
             # restore default signal handlers.
             signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -314,9 +334,26 @@ From here, the following directories are available:
             except AttributeError:
                 pass
         finally:
-            subprocess.call(["fusermount", "-u", "-z", self.args.mountpoint])
-            self.operations.destroy()
-        exit(rc)
+            sys.stderr.write("arv-mount: requesting statsthread to stop\n")
+            self._statsthread.stop()
+            sys.stderr.write("arv-mount: joining statsthread\n")
+            self._statsthread.join()
+            sys.stderr.write("arv-mount: calling _unmount_and_exit\n")
+            self._unmount_and_exit(rc)
+
+    def _unmount_and_exit(self, rc):
+        sys.stderr.write("arv-mount: calling _unmount\n")
+        self._unmount()
+        # join thread to wait for fuse termination
+        # sys.stderr.write("arv-mount: joining fuse thread to wait for termination (60s timeout)\n")
+        # self._fuse_thread.join(60.0)
+        # if self._fuse_thread.isAlive():
+        #     sys.stderr.write("arv-mount: fuse thread was still alive 60s after unmounting and will be forcibly terminated\n")
+        #     pid = os.getpid()
+        #     sys.stderr.write("arv-mount: sending SIGTERM to self\n")
+        #     os.kill(pid, signal.SIGTERM)
+        sys.stderr.write("arv-mount: calling sys.exit with status %s\n" % rc)
+        sys.exit(rc)
 
     def _run_standalone(self):
         try:
