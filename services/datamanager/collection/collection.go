@@ -214,8 +214,8 @@ func GetCollections(params GetCollectionsParams) (results ReadCollections, err e
 		if err != nil {
 			return results, err
 		}
-		if sdkParams["filters"].([][]string)[0][2] != latestModificationDate.Format(time.RFC3339) {
-			sdkParams["filters"].([][]string)[0][2] = latestModificationDate.Format(time.RFC3339)
+		if sdkParams["filters"].([][]string)[0][2] != latestModificationDate.Format(time.RFC3339Nano) {
+			sdkParams["filters"].([][]string)[0][2] = latestModificationDate.Format(time.RFC3339Nano)
 			sdkParams["offset"] = 0
 		} else {
 			sdkParams["offset"] = sdkParams["offset"].(int) + batchCollections
