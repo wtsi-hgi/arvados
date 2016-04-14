@@ -176,12 +176,15 @@ class KeepBlockCache(object):
             # None (that means there was an error reading the block).
             self._cache = [c for c in self._cache if not (c.ready.is_set() and c.content is None)]
             sm = sum([slot.size() for slot in self._cache])
-            while len(self._cache) > 0 and sm > self.cache_max:
+            if len(self._cache) > 0 and sm > self.cache_max:
                 for i in xrange(len(self._cache)-1, -1, -1):
                     if self._cache[i].ready.is_set():
+                        slot_size = self._cache[i].size()
+                        sm = sm - slot_size
                         del self._cache[i]
-                        break
-                sm = sum([slot.size() for slot in self._cache])
+                        if sm < self.cache_max or len(self._cache) <= 0:
+                            break
+
 
     def _get(self, locator):
         # Test if the locator is already in the cache
