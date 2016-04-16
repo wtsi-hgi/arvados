@@ -148,22 +148,28 @@ class KeepBlockCache(object):
         self._cache_lock = threading.Lock()
 
     class CacheSlot(object):
-        __slots__ = ("locator", "ready", "content")
+        __slots__ = ("locator", "ready", "content", "block_cache")
 
-        def __init__(self, locator):
+        def __init__(self, locator, block_cache):
+            print "KeepBlockCache.CacheSlot.__init__()"
             self.locator = locator
             self.ready = threading.Event()
             self.content = None
+            self.block_cache = block_cache
 
         def get(self):
+            print "KeepBlockCache.CacheSlot.get()"
             self.ready.wait()
             return self.content
 
         def set(self, value):
+            print "KeepBlockCache.CacheSlot.set()"
             self.content = value
             self.ready.set()
+            self.block_cache.cap_cache()
 
         def size(self):
+            print "KeepBlockCache.CacheSlot.size()"
             if self.content is None:
                 return 0
             else:
@@ -171,6 +177,7 @@ class KeepBlockCache(object):
 
     def cap_cache(self):
         '''Cap the cache size to self.cache_max'''
+        print "KeepBlockCache.cap_cache()"
         with self._cache_lock:
             # Select all slots except those where ready.is_set() and content is
             # None (that means there was an error reading the block).
@@ -184,6 +191,7 @@ class KeepBlockCache(object):
                 sm = sum([slot.size() for slot in self._cache])
 
     def _get(self, locator):
+        print "KeepBlockCache._get(%s)" % (locator)
         # Test if the locator is already in the cache
         for i in xrange(0, len(self._cache)):
             if self._cache[i].locator == locator:
@@ -196,69 +204,108 @@ class KeepBlockCache(object):
         return None
 
     def get(self, locator):
+        print "KeepBlockCache.get(%s)" % (locator)
         with self._cache_lock:
             return self._get(locator)
 
     def reserve_cache(self, locator):
         '''Reserve a cache slot for the specified locator,
         or return the existing slot.'''
+        print "KeepBlockCache.reserve(%s)" % (locator)
         with self._cache_lock:
             n = self._get(locator)
             if n:
                 return n, False
             else:
                 # Add a new cache slot for the locator
-                n = KeepBlockCache.CacheSlot(locator)
+                n = KeepBlockCache.CacheSlot(locator, self)
                 self._cache.insert(0, n)
                 return n, True
 
+# TODO check if this can be imported and if so use the LMDB version, otherwise revert to old version???            
 import lmdb
 
 class KeepBlockCacheWithLMDB(KeepBlockCache):
-    # TODO : set a different cache_max when initializing this class
-    lmdb_handler = lmdb.open('keep_caching_db', writemap=True, map_size=10 * 1024 * 1024 * 1024)
+    # Default LMDB cache is 10GiB
+    def __init__(self, cache_max=(10 * 1024 * 1024 * 1024)):
+        print "KeepBlockCacheWithLMDB.__init__()"
+        self.cache_max = cache_max
+        self._cache = []
+        self._cache_lock = threading.Lock()
+        lmdb_path = os.path.join(os.getenv('HOME', '/root'), '.cache/arvados/keep-lmdb')
+        print "opening lmdb %s" % (lmdb_path)
+        self.lmdb_env = lmdb.open(lmdb_path, writemap=True, map_size=self.cache_max, create=True)
 
     class CacheSlot(object):
-        __slots__ = ("locator", "ready", "content", "_lmdb_content_key")
+        __slots__ = ("locator", "ready", "content", "block_cache")
 
-        def __init__(self, locator):
+        def __init__(self, locator, block_cache):
+            print "KeepBlockCacheWithLMDB.CacheSlot.__init__()"
             self.locator = locator
             self.ready = threading.Event()
-            self._lmdb_content_key = str(locator)
-
+            self.block_cache = block_cache
+            
         @property
         def content(self):
+            print "KeepBlockCacheWithLMDB.CacheSlot.content[get]"
             return self.get()
 
         @content.setter
         def content(self, value):
+            print "KeepBlockCacheWithLMDB.CacheSlot.content[set]"
             return self.set(value)
 
         def get(self):
+            print "KeepBlockCacheWithLMDB.CacheSlot.get()"
             self.ready.wait()
-            with KeepBlockCacheWithLMDB.lmdb_handler.begin(buffer=True) as txn:
+            with self.block_cache.lmdb_env.begin(buffers=True) as txn:
                 #content = txn.get(self._lmdb_content_key.encode('ascii'))
-                content = txn.get(self._lmdb_content_key)
+                print "getting %s from lmdb cache" % (self.locator)
+                # Using bytes() here returns a copy of the content rather 
+                # than the buffer itself which is only valid until the 
+                # transaction completes
+                content = bytes(txn.get(self.locator))
             return content
 
         def set(self, value):
-            with KeepBlockCacheWithLMDB.lmdb_handler.begin(write=True, buffer=True) as txn:
-                #txn.put(self._lmdb_content_key.encode('ascii'), value.encode('ascii'))
-                txn.put(self._lmdb_content_key, value)
+            print "KeepBlockCacheWithLMDB.CacheSlot.set()"
+            self.block_cache.cap_cache(extra_space=size(value))
+            with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
+                #txn.put(self.locator.encode('ascii'), value.encode('ascii'))
+                print "putting %s to lmdb cache" % (self.locator)
+                txn.put(self.locator, value)
             self.ready.set()
 
         def size(self):
+            print "KeepBlockCacheWithLMDB.CacheSlot.size()"
             if self.content is None:
                 return 0
             else:
+                print "getting size of content for %s" % (self.locator)
                 return len(self.content)
 
-    def cap_cache(self):
+    def reserve_cache(self, locator):
+        '''Reserve a cache slot for the specified locator,
+        or return the existing slot.'''
+        print "KeepBlockCacheWithLMDB.reserve_cache(%s)" % (locator)
         with self._cache_lock:
-            with self.lmdb_handler.begin(write=True) as txn:
+            n = self._get(locator)
+            if n:
+                return n, False
+            else:
+                # Add a new cache slot for the locator
+                n = KeepBlockCacheWithLMDB.CacheSlot(locator, self)
+                self._cache.insert(0, n)
+                return n, True
+
+    def cap_cache(self):
+        print "KeepBlockCacheWithLMDB.cap_cache()"
+        with self._cache_lock:
+            with self.lmdb_env.begin(write=True, buffers=True) as txn:
                 self._cache = [c for c in self._cache if not (c.ready.is_set() and c.content is None)]
                 delete_candidates = (slot for slot in self._cache if slot.ready.is_set())
                 total_size = sum([slot.size() for slot in self._cache])
+                print "have total_size=%s" % (total_size)
                 if len(self._cache) > 0 and total_size > self.cache_max:
                     for slot in delete_candidates:
                         size_slot = slot.size()
@@ -732,7 +779,7 @@ class KeepClient(object):
         if local_store is None:
             local_store = os.environ.get('KEEP_LOCAL_STORE')
 
-        self.block_cache = block_cache if block_cache else KeepBlockCache()
+        self.block_cache = block_cache if block_cache else KeepBlockCacheWithLMDB()
         self.timeout = timeout
         self.proxy_timeout = proxy_timeout
         self._user_agent_pool = Queue.LifoQueue()
@@ -921,6 +968,7 @@ class KeepClient(object):
 
     def get_from_cache(self, loc):
         """Fetch a block only if is in the cache, otherwise return None."""
+        print "KeepWriterThread.get_from_cache(%s)" % (loc)
         slot = self.block_cache.get(loc)
         if slot is not None and slot.ready.is_set():
             return slot.get()
@@ -948,6 +996,7 @@ class KeepClient(object):
           that are named in location hints in the locator.  The default value
           is set when the KeepClient is initialized.
         """
+        print "KeepWriterThread.get(%s)" % (loc_s)
         if ',' in loc_s:
             return ''.join(self.get(x) for x in loc_s.split(','))
 
@@ -1014,8 +1063,8 @@ class KeepClient(object):
             loop.save_result((blob, len(services_to_try)))
 
         # Always cache the result, then return it if we succeeded.
+        
         slot.set(blob)
-        self.block_cache.cap_cache()
         if loop.success():
             return blob
 
@@ -1055,6 +1104,7 @@ class KeepClient(object):
           exponential backoff.  The default value is set when the
           KeepClient is initialized.
         """
+        print "KeepWriterThread.put()"
 
         if isinstance(data, unicode):
             data = data.encode("ascii")
@@ -1154,4 +1204,5 @@ class KeepClient(object):
             return f.read()
 
     def is_cached(self, locator):
+        print "KeepWriterThread.is_cached(%s)" % (locator)
         return self.block_cache.reserve_cache(expect_hash)
