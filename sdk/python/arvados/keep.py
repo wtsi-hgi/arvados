@@ -264,12 +264,12 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
                 # Using bytes() here returns a copy of the content rather 
                 # than the buffer itself which is only valid until the 
                 # transaction completes
-                content = bytes(txn.get(self.locator))
+                content = bytes(txn.get(str(self.locator)))
             return content
 
-        def set(self, value):
+        def set(self, value, size):
             print "KeepBlockCacheWithLMDB.CacheSlot.set()"
-            self.block_cache.cap_cache(extra_space=size(value))
+            self.block_cache.cap_cache(extra_space=size)
             with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
                 #txn.put(self.locator.encode('ascii'), value.encode('ascii'))
                 print "putting %s to lmdb cache" % (self.locator)
