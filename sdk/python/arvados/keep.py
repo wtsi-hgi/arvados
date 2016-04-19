@@ -234,7 +234,8 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         self._cache_lock = threading.Lock()
         lmdb_path = os.path.join(os.getenv('HOME', '/root'), '.cache/arvados/keep-lmdb')
         print "opening lmdb %s" % (lmdb_path)
-        self.lmdb_env = lmdb.open(lmdb_path, writemap=True, map_size=self.cache_max, create=True)
+	map_size = 20 * 1024 * 1024 * 1024
+        self.lmdb_env = lmdb.open(lmdb_path, writemap=True, map_size=map_size, create=True)
 
     class CacheSlot(object):
         __slots__ = ("locator", "ready", "content", "block_cache")
@@ -258,6 +259,7 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         def get(self):
             print "KeepBlockCacheWithLMDB.CacheSlot.get()"
             self.ready.wait()
+	    print "Before entering with"
             with self.block_cache.lmdb_env.begin(buffers=True) as txn:
                 #content = txn.get(self._lmdb_content_key.encode('ascii'))
                 print "getting %s from lmdb cache" % (self.locator)
@@ -267,13 +269,15 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
                 content = bytes(txn.get(str(self.locator)))
             return content
 
-        def set(self, value, size):
+        def set(self, value, size=None):
+	    if not size:
+		size = len(value)
             print "KeepBlockCacheWithLMDB.CacheSlot.set()"
             self.block_cache.cap_cache(extra_space=size)
             with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
                 #txn.put(self.locator.encode('ascii'), value.encode('ascii'))
                 print "putting %s to lmdb cache" % (self.locator)
-                txn.put(self.locator, value)
+                txn.put(self.locator, bytes(value))
             self.ready.set()
 
         def size(self):
@@ -298,13 +302,13 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
                 self._cache.insert(0, n)
                 return n, True
 
-    def cap_cache(self):
+    def cap_cache(self, extra_space):
         print "KeepBlockCacheWithLMDB.cap_cache()"
         with self._cache_lock:
             with self.lmdb_env.begin(write=True, buffers=True) as txn:
                 self._cache = [c for c in self._cache if not (c.ready.is_set() and c.content is None)]
                 delete_candidates = (slot for slot in self._cache if slot.ready.is_set())
-                total_size = sum([slot.size() for slot in self._cache])
+                total_size = sum([slot.size() for slot in self._cache]) + extra_space
                 print "have total_size=%s" % (total_size)
                 if len(self._cache) > 0 and total_size > self.cache_max:
                     for slot in delete_candidates:
