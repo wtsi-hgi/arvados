@@ -234,8 +234,8 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         self._cache_lock = threading.Lock()
         lmdb_path = os.path.join(os.getenv('HOME', '/root'), '.cache/arvados/keep-lmdb')
         print "opening lmdb %s" % (lmdb_path)
-        
-        self.lmdb_env = lmdb.open(lmdb_path, writemap=True, map_size=self.cache_max, create=True)
+        map_size = 20 * 1024 * 1024 * 1024
+        self.lmdb_env = lmdb.open(lmdb_path, writemap=True, map_size=map_size, create=True)
 
     class CacheSlot(object):
         __slots__ = ("locator", "ready", "content", "block_cache")
@@ -265,29 +265,36 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
                 # Using bytes() here returns a copy of the content rather 
                 # than the buffer itself which is only valid until the 
                 # transaction completes
-                content = bytes(txn.get(str(self.locator)))
+                content = txn.get(str(self.locator))
             return content
 
         def set(self, value, size=None):
+            if not size:
+                # Q for Josh: what were the reasons why you weren't happy to use sys.sizeof(object)?
+                size = len(value)
             print "KeepBlockCacheWithLMDB.CacheSlot.set()"
             self.block_cache.cap_cache(extra_space=size)
             with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
-                #txn.put(self.locator.encode('ascii'), value.encode('ascii'))
                 print "putting %s to lmdb cache" % (self.locator)
-                txn.put(self.locator, value)
+                txn.put(self.locator, bytes(value))
                 if not size:
                     size = len(value)
                 size_key = str(self.locator)+'_size'
-                txn.put(str(size_key), str(size))
+                txn.put(size_key, bytes(size))
             self.ready.set()
 
         def size(self):
             print "KeepBlockCacheWithLMDB.CacheSlot.size()"
-            if self.content is None:
-                return 0
-            else:
-                print "getting size of content for %s" % (self.locator)
-                return len(self.content)
+            # if self.content is None:
+            #     return 0
+            # else:
+            print "getting size of content for %s" % (self.locator)
+            #return len(self.content)
+            result = 0
+            with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
+                result = txn.get(self.locator+'_size')
+            print "For locator %s I've got size: %s" % (str(self.locator), str(result))
+            return int(str(result))
 
     def reserve_cache(self, locator):
         '''Reserve a cache slot for the specified locator,
@@ -303,13 +310,13 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
                 self._cache.insert(0, n)
                 return n, True
 
-    def cap_cache(self):
+    def cap_cache(self, extra_space):
         print "KeepBlockCacheWithLMDB.cap_cache()"
         with self._cache_lock:
             with self.lmdb_env.begin(write=True, buffers=True) as txn:
                 self._cache = [c for c in self._cache if not (c.ready.is_set() and c.content is None)]
                 delete_candidates = (slot for slot in self._cache if slot.ready.is_set())
-                total_size = sum([slot.size() for slot in self._cache])
+                total_size = sum([slot.size() for slot in self._cache]) + extra_space
                 print "have total_size=%s" % (total_size)
                 if len(self._cache) > 0 and total_size > self.cache_max:
                     for slot in delete_candidates:
