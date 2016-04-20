@@ -234,6 +234,7 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         self._cache_lock = threading.Lock()
         lmdb_path = os.path.join(os.getenv('HOME', '/root'), '.cache/arvados/keep-lmdb')
         print "opening lmdb %s" % (lmdb_path)
+        
         self.lmdb_env = lmdb.open(lmdb_path, writemap=True, map_size=self.cache_max, create=True)
 
     class CacheSlot(object):
@@ -267,13 +268,17 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
                 content = bytes(txn.get(str(self.locator)))
             return content
 
-        def set(self, value, size):
+        def set(self, value, size=None):
             print "KeepBlockCacheWithLMDB.CacheSlot.set()"
             self.block_cache.cap_cache(extra_space=size)
             with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
                 #txn.put(self.locator.encode('ascii'), value.encode('ascii'))
                 print "putting %s to lmdb cache" % (self.locator)
                 txn.put(self.locator, value)
+                if not size:
+                    size = len(value)
+                size_key = str(self.locator)+'_size'
+                txn.put(str(size_key), str(size))
             self.ready.set()
 
         def size(self):
