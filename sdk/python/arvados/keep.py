@@ -236,6 +236,9 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         print "opening lmdb %s" % (lmdb_path)
         map_size = 20 * 1024 * 1024 * 1024
         self.lmdb_env = lmdb.open(lmdb_path, writemap=True, map_size=map_size, create=True)
+        # This should be in a different part of the app
+        if not self.get_total_data_size():
+            self.set_total_data_size(0)
 
     class CacheSlot(object):
         __slots__ = ("locator", "ready", "content", "block_cache")
@@ -275,13 +278,7 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
             print "KeepBlockCacheWithLMDB.CacheSlot.set()"
             self.block_cache.cap_cache(extra_space=size)
             with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
-                total_size = txn.get(bytes('total_size'))
-                if not total_size:
-                    total_size = 0
-                    txn.put(bytes('total_size'), bytes(total_size))
-                else:
-                    total_size = int(total_size)
-                print "Total size: %s" % str(total_size)
+                total_size = self.block_cache.get_total_data_size()
                 print "putting %s to lmdb cache" % (self.locator)
                 txn.put(bytes(self.locator), bytes(value))
                 if not size:
@@ -306,6 +303,20 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
                 return 0
             return int(str(result))
 
+    def get_total_data_size(self):
+        with self.lmdb_env.begin(buffers=True) as txn:
+            total_size = txn.get(bytes('total_size'))
+        if total_size:
+            total_size = int(total_size)
+        else:
+            total_size = 0
+        print "Total size: %s" % str(total_size)
+        return total_size
+
+    def set_total_data_size(self, size):
+        with self.lmdb_env.begin(buffers=True, write=True) as txn:
+            txn.put(bytes('total_size'), bytes(size))
+
     def reserve_cache(self, locator):
         '''Reserve a cache slot for the specified locator,
         or return the existing slot.'''
@@ -320,13 +331,27 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
                 self._cache.insert(0, n)
                 return n, True
 
+    def _get(self, locator):
+        print "KeepBlockCache._get(%s)" % (locator)
+        # Test if the locator is already in the cache
+        for i in xrange(0, len(self._cache)):
+            if self._cache[i].locator == locator:
+                n = self._cache[i]
+                if i != 0:
+                    # move it to the front
+                    del self._cache[i]
+                    self._cache.insert(0, n)
+                return n
+        return None
+
     def cap_cache(self, extra_space):
         print "KeepBlockCacheWithLMDB.cap_cache()"
         with self._cache_lock:
             with self.lmdb_env.begin(write=True, buffers=True) as txn:
                 self._cache = [c for c in self._cache if not (c.ready.is_set() and c.content is None)]
                 delete_candidates = (slot for slot in self._cache if slot.ready.is_set())
-                total_size = sum([slot.size() for slot in self._cache]) + extra_space
+                #total_size = sum([slot.size() for slot in self._cache]) + extra_space
+                total_size = self.get_total_data_size() + extra_space
                 print "have total_size=%s" % (total_size)
                 if len(self._cache) > 0 and total_size > self.cache_max:
                     for slot in delete_candidates:
@@ -335,6 +360,7 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
                         self._cache.remove(slot)
                         total_size = total_size - size_slot
                         if total_size < self.cache_max or len(self._cache) <= 0:
+                            self.set_total_data_size(total_size)
                             break
 
 
