@@ -275,12 +275,19 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
             print "KeepBlockCacheWithLMDB.CacheSlot.set()"
             self.block_cache.cap_cache(extra_space=size)
             with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
+                total_size = int(txn.get(bytes('total_size')))
+                if not total_size:
+                    total_size = 0
+                    txn.put(bytes('total_size'), bytes(total_size))
+                print "Total size: %s" % str(total_size)
                 print "putting %s to lmdb cache" % (self.locator)
                 txn.put(bytes(self.locator), bytes(value))
                 if not size:
                     size = len(value)
                 size_key = str(self.locator)+'_size'
                 txn.put(bytes(size_key), bytes(size))
+                total_size = total_size + size
+                txn.put(bytes('total_size'), bytes(total_size))
             self.ready.set()
 
         def size(self):
@@ -293,8 +300,8 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
             with self.block_cache.lmdb_env.begin(buffers=True) as txn:
                 result = txn.get(str(self.locator)+'_size')
             print "For locator %s I've got size: %s" % (str(self.locator), str(result))
-	    if not result:
-		return 0
+            if not result:
+                return 0
             return int(str(result))
 
     def reserve_cache(self, locator):
