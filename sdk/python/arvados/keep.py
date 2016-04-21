@@ -239,18 +239,23 @@ class KeepBlockCacheWithLMDB:
 
 
     class CacheSlot(object):
-        __slots__ = ("locator", "ready", "content", "block_cache")
+        __slots__ = ("locator", "ready", "content", "block_cache", "_content")
 
         def __init__(self, locator, block_cache):
             print "KeepBlockCacheWithLMDB.CacheSlot.__init__()"
             self.locator = locator
             self.ready = threading.Event()
             self.block_cache = block_cache
+            self._content = None
 
+        def store_content(self, content):
+            self._content = content
 
         @property
         def content(self):
             print "KeepBlockCacheWithLMDB.CacheSlot.content[get]"
+            if self._content:
+                return self._content
             return self.get()
 
         @content.setter
@@ -261,6 +266,8 @@ class KeepBlockCacheWithLMDB:
         def get(self):
             print "KeepBlockCacheWithLMDB.CacheSlot.get()"
             self.ready.wait()
+            if self._content:
+                return self._content
             return self.block_cache.get(self.locator)
 
         def set(self, value, size=None):
@@ -363,7 +370,8 @@ class KeepBlockCacheWithLMDB:
         print "KeepBlockCacheWithLMDB.reserve_cache(%s)" % (locator)
         content = self.get(locator)
         if content:
-            return content, False
+            slot = KeepBlockCacheWithLMDB.CacheSlot(locator, self)
+            slot.store_content(content)
         else:
             new_block = KeepBlockCacheWithLMDB.CacheSlot(locator, self)
             return new_block, True
