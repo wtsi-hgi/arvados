@@ -360,8 +360,7 @@ class KeepBlockCacheWithLMDB:
         '''Reserve a cache slot for the specified locator,
         or return the existing slot.'''
         print "KeepBlockCacheWithLMDB.reserve_cache(%s)" % (locator)
-        with self.lmdb_env.begin(buffers=True) as txn:
-            content = txn.get(str(locator))
+        content = self.get(locator)
         if content:
             return content, False
         else:
