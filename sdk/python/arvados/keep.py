@@ -225,6 +225,7 @@ class KeepBlockCache(object):
 # TODO check if this can be imported and if so use the LMDB version, otherwise revert to old version???            
 import lmdb
 import time
+import operator
 
 class KeepBlockCacheWithLMDB:
     # Default LMDB cache is 10GiB
@@ -288,14 +289,33 @@ class KeepBlockCacheWithLMDB:
             self.block_cache._increase_total_size_by(size)
             self.ready.set()
 
+        def delete(self):
+            '''
+            Deletes an element and returns the size of the element deleted.
+            :return:
+            '''
+            with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
+                txn.delete(str(self.locator))
+            with self.block_cache.lmdb_meta_env.begin(write=True, buffers=True) as txn:
+                size = txn.get(str(self.locator)+'_size')
+                txn.delete(str(self.locator)+'_size')
+                txn.delete(str(self.locator)+'_timestamp')
+            self.block_cache._decrease_total_size_by(size)
+            return size
+
         def _set_size(self, size):
             size_key = str(self.locator) + '_size'
-            with self.block_cache.lmdb_mgr_env.begin(write=True, buffers=True) as txn:
+            with self.block_cache.lmdb_meta_env.begin(write=True, buffers=True) as txn:
                 txn.put(bytes(size_key), bytes(size))
 
         def _set_timestamp(self):
-            with self.block_cache.lmdb_mgr_env.begin(write=True, buffers=True) as txn:
-                txn.put(bytes(str(self.locator)), time.time())
+            with self.block_cache.lmdb_meta_env.begin(write=True, buffers=True) as txn:
+                timestamps_key = str(self.locator)+'_timestamp'
+                txn.put(bytes(timestamps_key), time.time())
+
+        def get_timestamp(self):
+            with self.block_cache.lmdb_meta_env.begin(buffers=True) as txn:
+                txn.get(bytes(str(self.locator)))
 
     def size(self):
         print "KeepBlockCacheWithLMDB.CacheSlot.size()"
@@ -328,6 +348,9 @@ class KeepBlockCacheWithLMDB:
                 total_size = int(total_size) + extra_size
                 txn.set(bytes('total_size'), total_size)
 
+    def _decrease_total_size_by(self, size):
+        pass
+
     def reserve_cache(self, locator):
         '''Reserve a cache slot for the specified locator,
         or return the existing slot.'''
@@ -358,8 +381,28 @@ class KeepBlockCacheWithLMDB:
 
     def cap_cache(self, extra_space):
         print "KeepBlockCacheWithLMDB.cap_cache()"
-        with self._cache_lock:
-            with self.lmdb_env.begin(write=True, buffers=True) as txn:
+        #with self._cache_lock:
+        total_size = self.get_total_data_size()
+        if total_size > self.cache_max:
+            to_delete_list = []
+            timestamps = {}
+            with self.lmdb_env.begin(write=True, buffers=True) as txn_env:
+                cursor = txn_env.cursor()
+                with self.lmdb_meta_env.begin(buffers=True) as txn_meta:
+                    for locator, _ in cursor:
+                        size = txn_meta.get(str(locator)+'_size')
+                        if size:
+                            timestamps[str(locator)] = txn_meta.get(str(locator)+'_timestamp')
+        sorted_timestamps = sorted(timestamps.items(), key=operator.itemgetter(1), reverse=True)    # tuples
+        for locator, timestamp in sorted_timestamps:
+            elem_size = self.CacheSlot.delete() # weird, am I deleting myself?!
+            if total_size - elem_size < self.cache_max:
+                break
+            total_size -= elem_size
+
+
+
+
                 self._cache = [c for c in self._cache if not (c.ready.is_set() and c.content is None)]
                 delete_candidates = (slot for slot in self._cache if slot.ready.is_set())
                 total_size = self.get_total_data_size() + extra_space
