@@ -249,11 +249,6 @@ class KeepBlockCacheWithLMDB:
             self._set_timestamp()
 
 
-        class Data(object):
-            def __init__(self, data, size):
-                self.data = data
-                self.size = size
-
         @property
         def content(self):
             print "KeepBlockCacheWithLMDB.CacheSlot.content[get]"
@@ -271,7 +266,7 @@ class KeepBlockCacheWithLMDB:
                 print "getting %s from lmdb cache" % str(self.locator)
                 content = txn.get(str(self.locator))
             self._set_timestamp()
-            return content.data
+            return content
 
         def set(self, value, size=None):
             if not size:
@@ -281,24 +276,12 @@ class KeepBlockCacheWithLMDB:
             self.block_cache.cap_cache(extra_space=size)
             with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
                 print "putting %s to lmdb cache" % (self.locator)
-                content = self.Data(value, size)
-                txn.put(bytes(str(self.locator)), bytes(content))
+                txn.put(bytes(str(self.locator)), bytes(value))
+                txn.put(bytes(str(self.locator)+'_size'), bytes(size))
+
             self._set_timestamp()
             self.block_cache._increase_total_size_by(size)
             self.ready.set()
-
-        def delete(self, locator):
-            '''
-            Deletes an element and returns the size of the element deleted.
-            :return:
-            '''
-            with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
-                size = txn.get(str(locator)).size
-                txn.delete(str(self.locator))
-                txn.delete(str(self.locator)+'_timestamp')
-            self.block_cache._decrease_total_size_by(size)
-            return size
-
 
         def _set_timestamp(self):
             with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
@@ -312,11 +295,25 @@ class KeepBlockCacheWithLMDB:
         def size(self):
             print "KeepBlockCacheWithLMDB.CacheSlot.size()"
             with self.block_cache.lmdb_env.begin(buffers=True) as txn:
-                result = txn.get(str(self.locator))
-            print "For locator %s I've got size: %s" % (str(self.locator), str(result.size))
+                result = txn.get(str(self.locator)+'_size')
+            print "For locator %s I've got size: %s" % (str(self.locator), str(result))
             if not result:
                 return 0
-            return int(str(result.size))
+            return int(str(result))
+
+
+    def delete(self, locator):
+        """
+        Deletes an element and returns the size of the element deleted.
+        :return:
+        """
+        with self.lmdb_env.begin(write=True, buffers=True) as txn:
+            size = txn.get(str(locator)).size
+            txn.delete(str(locator))
+            txn.delete(str(locator)+'_timestamp')
+        self._decrease_total_size_by(size)
+        return size
+
 
     def get_total_data_size(self):
         with self.lmdb_env.begin(buffers=True) as txn:
@@ -349,6 +346,7 @@ class KeepBlockCacheWithLMDB:
                     total_size -= size
                     txn.put(bytes('total_size'), bytes(total_size))
                 else:
+                    txn.put(bytes('total_size'), bytes(0))
                     raise ValueError("Total size doesnt add up. There might be some concurrency bugs.")
 
 
@@ -360,7 +358,7 @@ class KeepBlockCacheWithLMDB:
         with self.lmdb_env.begin(buffers=True) as txn:
             content = txn.get(str(locator))
         if content:
-            return content.data, False
+            return content, False
         else:
             new_block = KeepBlockCacheWithLMDB.CacheSlot(locator, self)
             return new_block, True
@@ -382,7 +380,7 @@ class KeepBlockCacheWithLMDB:
                         timestamps[data_locator] = value
             sorted_timestamps = sorted(timestamps.items(), key=operator.itemgetter(1), reverse=True)    # (k,v) tuples
             for locator, timestamp in sorted_timestamps:
-                elem_size = self.CacheSlot.delete(locator)
+                elem_size = self.delete(locator)
                 total_size -= elem_size
                 if total_size < self.cache_max:
                     break
