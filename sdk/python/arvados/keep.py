@@ -262,11 +262,7 @@ class KeepBlockCacheWithLMDB:
         def get(self):
             print "KeepBlockCacheWithLMDB.CacheSlot.get()"
             self.ready.wait()
-            with self.block_cache.lmdb_env.begin(buffers=True) as txn:
-                print "getting %s from lmdb cache" % str(self.locator)
-                content = txn.get(str(self.locator))
-            self._set_timestamp()
-            return content
+            return self.block_cache.get(self.locator)
 
         def set(self, value, size=None):
             if not size:
@@ -278,19 +274,10 @@ class KeepBlockCacheWithLMDB:
                 print "putting %s to lmdb cache" % (self.locator)
                 txn.put(bytes(str(self.locator)), bytes(value))
                 txn.put(bytes(str(self.locator)+'_size'), bytes(size))
-
-            self._set_timestamp()
+            self.block_cache._set_timestamp(self.locator)
             self.block_cache._increase_total_size_by(size)
             self.ready.set()
 
-        def _set_timestamp(self):
-            with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
-                timestamps_key = str(self.locator)+'_timestamp'
-                txn.put(bytes(timestamps_key), time.time())
-
-        def get_timestamp(self):
-            with self.block_cache.lmdb_env.begin(buffers=True) as txn:
-                txn.get(bytes(str(self.locator)+'_timestamp'))
 
         def size(self):
             print "KeepBlockCacheWithLMDB.CacheSlot.size()"
@@ -301,6 +288,24 @@ class KeepBlockCacheWithLMDB:
                 return 0
             return int(str(result))
 
+    def _get(self, locator):
+        with self.lmdb_env.begin(buffers=True) as txn:
+            print "getting %s from lmdb cache" % str(locator)
+            content = txn.get(str(locator))
+            self._set_timestamp(locator)
+        return bytes(content)
+
+    def _set_timestamp(self, locator):
+        with self.lmdb_env.begin(write=True, buffers=True) as txn:
+            timestamps_key = str(locator)+'_timestamp'
+            txn.put(bytes(timestamps_key), time.time())
+
+    def get_timestamp(self, locator):
+        with self.lmdb_env.begin(buffers=True) as txn:
+            txn.get(bytes(str(locator)+'_timestamp'))
+
+    def get(self, locator):
+        return self._get(locator)
 
     def delete(self, locator):
         """
