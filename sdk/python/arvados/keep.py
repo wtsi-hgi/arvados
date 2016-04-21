@@ -372,6 +372,7 @@ class KeepBlockCacheWithLMDB:
         if content:
             slot = KeepBlockCacheWithLMDB.CacheSlot(locator, self)
             slot.store_content(content)
+            return slot, False
         else:
             new_block = KeepBlockCacheWithLMDB.CacheSlot(locator, self)
             return new_block, True
