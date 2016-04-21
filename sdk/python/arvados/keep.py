@@ -246,7 +246,6 @@ class KeepBlockCacheWithLMDB:
             self.locator = locator
             self.ready = threading.Event()
             self.block_cache = block_cache
-            self._set_timestamp()
 
 
         @property
@@ -298,11 +297,12 @@ class KeepBlockCacheWithLMDB:
     def _set_timestamp(self, locator):
         with self.lmdb_env.begin(write=True, buffers=True) as txn:
             timestamps_key = str(locator)+'_timestamp'
-            txn.put(bytes(timestamps_key), time.time())
+            txn.put(bytes(timestamps_key), bytes(time.time()))
 
-    def get_timestamp(self, locator):
+    def _get_timestamp(self, locator):
         with self.lmdb_env.begin(buffers=True) as txn:
-            txn.get(bytes(str(locator)+'_timestamp'))
+            timestamp = txn.get(bytes(str(locator)+'_timestamp'))
+        return str(timestamp)
 
     def get(self, locator):
         return self._get(locator)
@@ -313,9 +313,10 @@ class KeepBlockCacheWithLMDB:
         :return:
         """
         with self.lmdb_env.begin(write=True, buffers=True) as txn:
-            size = txn.get(str(locator)).size
+            size = txn.get(str(locator)+'_size')
             txn.delete(str(locator))
             txn.delete(str(locator)+'_timestamp')
+            txn.delete(str(locator)+'_size')
         self._decrease_total_size_by(size)
         return size
 
@@ -388,7 +389,6 @@ class KeepBlockCacheWithLMDB:
                 total_size -= elem_size
                 if total_size < self.cache_max:
                     break
-            self._set_total_data_size(total_size)
 
 
 
