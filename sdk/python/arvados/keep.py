@@ -295,6 +295,7 @@ class KeepBlockCacheWithLMDB:
             return int(str(result))
 
     def _get(self, locator):
+        print "In KeepBlockCacheWithLMDB.get()"
         with self.lmdb_env.begin(buffers=True) as txn:
             print "getting %s from lmdb cache" % str(locator)
             content = txn.get(str(locator))
@@ -312,6 +313,7 @@ class KeepBlockCacheWithLMDB:
         return str(timestamp)
 
     def get(self, locator):
+        print "In KeepBlockCacheWithLMDB.get()"
         return self._get(locator)
 
     def delete(self, locator):
