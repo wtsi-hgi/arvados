@@ -271,10 +271,10 @@ class KeepBlockCacheWithLMDB:
             return self.block_cache.get(self.locator)
 
         def set(self, value, size=None):
+            print "KeepBlockCacheWithLMDB.CacheSlot.set()"
             if not size:
                 # Q for Josh: what were the reasons why you weren't happy to use sys.sizeof(object)?
                 size = len(value)
-            print "KeepBlockCacheWithLMDB.CacheSlot.set()"
             self.block_cache.cap_cache(extra_space=size)
             with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
                 print "putting %s to lmdb cache" % (self.locator)
