@@ -176,9 +176,8 @@ class KeepBlockCache(object):
             # None (that means there was an error reading the block).
             self._cache = [c for c in self._cache if not (c.ready.is_set() and c.content is None)]
             sm = sum([slot.size() for slot in self._cache])
-            #if len(self._cache) > 0 and sm > self.cache_max:
             for i in xrange(len(self._cache)-1, -1, -1):
-                if sm < self.cache_max or len(self._cache) <= 0:
+                if sm < self.cache_max or len(self._cache) == 0:
                     break
                 if self._cache[i].ready.is_set():
                     slot_size = self._cache[i].size()
