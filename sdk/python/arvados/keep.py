@@ -376,10 +376,12 @@ class KeepBlockCacheWithLMDB:
         print "KeepBlockCacheWithLMDB.reserve_cache(%s)" % (locator)
         content = self.get(locator)
         if content:
-            slot = KeepBlockCacheWithLMDB(locator=locator)
-            slot.store_content(content)
-            return slot, False
+            print "There is content for this locator"
+            block = KeepBlockCacheWithLMDB(locator=locator)
+            block.store_content(content)
+            return block, False
         else:
+            print "There is NO content for this locator, brand new block"
             new_block = KeepBlockCacheWithLMDB(locator=locator)
             return new_block, True
 
@@ -1097,8 +1099,10 @@ class KeepClient(object):
         locator = KeepLocator(loc_s)
         slot, first = self.block_cache.reserve_cache(locator.md5sum)
         if not first:
+            print "Not first withint KeepWriterThread.get"
             self.hits_counter.add(1)
             v = slot.get()
+            print "Before returning..."
             return v
 
         self.misses_counter.add(1)
