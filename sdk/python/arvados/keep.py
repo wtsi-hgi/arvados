@@ -292,20 +292,28 @@ class KeepBlockCacheWithLMDB:
     #         self.ready = threading.Event()
     #         self.block_cache = block_cache
     #         self._content = None
+    def wait_and_get(self, locator):
+        self.ready.wait()
+        return self._get(locator)
 
+    def _get(self, locator):
+        with self.lmdb_env.begin(buffers=True) as txn:
+            print "getting %s from lmdb cache" % str(locator)
+            content = txn.get(str(locator))
+            if content:
+                self._set_timestamp(locator)
+            else:
+                return None
 
     def get(self, locator=None):
         print "KeepBlockCacheWithLMDB.get()"
         if not locator:
             locator = self.locator
-        self.ready.wait()
+        #self.ready.wait()
         if self._content:
             return self._content
         else:
-            with self.lmdb_env.begin(buffers=True) as txn:
-                print "getting %s from lmdb cache" % str(locator)
-                content = txn.get(str(locator))
-                self._set_timestamp(locator)
+            self._get(locator)
         return bytes(content)
 
 
@@ -1101,7 +1109,7 @@ class KeepClient(object):
         if not first:
             print "Not first withint KeepWriterThread.get"
             self.hits_counter.add(1)
-            v = slot.get()
+            v = slot.wait_and_get(locator)
             print "Before returning..."
             return v
 
