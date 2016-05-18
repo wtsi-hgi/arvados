@@ -1109,7 +1109,8 @@ class KeepClient(object):
         if not first:
             print "Not first withint KeepWriterThread.get"
             self.hits_counter.add(1)
-            v = slot.wait_and_get(locator)
+            #v = slot.wait_and_get(locator)
+            v = slot.get(locator)
             print "Before returning..."
             return v
 
