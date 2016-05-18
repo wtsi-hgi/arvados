@@ -237,6 +237,7 @@ class KeepBlockCacheWithLMDB:
         lmdb_map_size = 20 * 1024 * 1024 * 1024  # 20GB for the cache itself
         self.lmdb_env = lmdb.open(lmdb_path, writemap=True, map_size=lmdb_map_size, create=True)
 
+        self._set_total_data_size(0)
         # Imported from CacheSlot
         self.locator = locator
         self.ready = threading.Event()
@@ -306,21 +307,7 @@ class KeepBlockCacheWithLMDB:
                 content = txn.get(str(locator))
                 self._set_timestamp(locator)
         return bytes(content)
-        #return self.block_cache.get(self.locator)
 
-
-    # def get(self, locator):
-    #     print "In KeepBlockCacheWithLMDB.get()"
-    #     return self._get(locator)
-
-
-    # def _get(self, locator):
-    #     print "In KeepBlockCacheWithLMDB._get()"
-    #     with self.lmdb_env.begin(buffers=True) as txn:
-    #         print "getting %s from lmdb cache" % str(locator)
-    #         content = txn.get(str(locator))
-    #         self._set_timestamp(locator)
-    #     return bytes(content)
 
     def _set_timestamp(self, locator):
         with self.lmdb_env.begin(write=True, buffers=True) as txn:
