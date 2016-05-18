@@ -228,7 +228,7 @@ import time
 import operator
 
 class KeepBlockCacheWithLMDB:
-    def __init__(self, cache_max=(10 * 1024 * 1024 * 1024)):
+    def __init__(self, cache_max=(10 * 1024 * 1024 * 1024), locator=None):
         print "KeepBlockCacheWithLMDB.__init__()"
         self.cache_max = cache_max
         self._cache = []
@@ -237,70 +237,90 @@ class KeepBlockCacheWithLMDB:
         lmdb_map_size = 20 * 1024 * 1024 * 1024  # 20GB for the cache itself
         self.lmdb_env = lmdb.open(lmdb_path, writemap=True, map_size=lmdb_map_size, create=True)
 
-
-    class CacheSlot(object):
-        __slots__ = ("locator", "ready", "content", "block_cache", "_content")
-
-        def __init__(self, locator, block_cache):
-            print "KeepBlockCacheWithLMDB.CacheSlot.__init__()"
-            self.locator = locator
-            self.ready = threading.Event()
-            self.block_cache = block_cache
-            self._content = None
-
-        def store_content(self, content):
-            self._content = content
-
-        @property
-        def content(self):
-            print "KeepBlockCacheWithLMDB.CacheSlot.content[get]"
-            if self._content:
-                return self._content
-            return self.get()
-
-        @content.setter
-        def content(self, value):
-            print "KeepBlockCacheWithLMDB.CacheSlot.content[set]"
-            return self.set(value)
-
-        def get(self):
-            print "KeepBlockCacheWithLMDB.CacheSlot.get()"
-            self.ready.wait()
-            if self._content:
-                return self._content
-            return self.block_cache.get(self.locator)
-
-        def set(self, value, size=None):
-            if not size:
-                # Q for Josh: what were the reasons why you weren't happy to use sys.sizeof(object)?
-                size = len(value)
-            print "KeepBlockCacheWithLMDB.CacheSlot.set()"
-            self.block_cache.cap_cache(extra_space=size)
-            with self.block_cache.lmdb_env.begin(write=True, buffers=True) as txn:
-                print "putting %s to lmdb cache" % (self.locator)
-                txn.put(bytes(str(self.locator)), bytes(value))
-                txn.put(bytes(str(self.locator)+'_size'), bytes(size))
-            self.block_cache._set_timestamp(self.locator)
-            self.block_cache._increase_total_size_by(size)
-            self.ready.set()
+        # Imported from CacheSlot
+        self.locator = locator
+        self.ready = threading.Event()
+        self._content = None
 
 
-        def size(self):
-            print "KeepBlockCacheWithLMDB.CacheSlot.size()"
-            with self.block_cache.lmdb_env.begin(buffers=True) as txn:
-                result = txn.get(str(self.locator)+'_size')
-            print "For locator %s I've got size: %s" % (str(self.locator), str(result))
-            if not result:
-                return 0
-            return int(str(result))
+    def store_content(self, content):
+        self._content = content
 
-    def _get(self, locator):
-        print "In KeepBlockCacheWithLMDB.get()"
+    @property
+    def content(self):
+        print "KeepBlockCacheWithLMDB.content[get]"
+        if self._content:
+            return self._content
+        return self.get()
+
+    @content.setter
+    def content(self, value):
+        print "KeepBlockCacheWithLMDB.content[set]"
+        return self.set(value)
+
+    def set(self, value, size=None):
+        print "KeepBlockCacheWithLMDB.set()"
+        if not size:
+            # Q for Josh: what were the reasons why you weren't happy to use sys.sizeof(object)?
+            size = len(value)
+        self.cap_cache(extra_space=size)
+        with self.lmdb_env.begin(write=True, buffers=True) as txn:
+            print "putting %s to lmdb cache" % (self.locator)
+            txn.put(bytes(str(self.locator)), bytes(value))
+            txn.put(bytes(str(self.locator)+'_size'), bytes(size))
+        self._set_timestamp(self.locator)
+        self._increase_total_size_by(size)
+        self.ready.set()
+
+    def size(self):
+        print "KeepBlockCacheWithLMDB.size()"
         with self.lmdb_env.begin(buffers=True) as txn:
-            print "getting %s from lmdb cache" % str(locator)
-            content = txn.get(str(locator))
-            self._set_timestamp(locator)
+            result = txn.get(str(self.locator)+'_size')
+        print "For locator %s I've got size: %s" % (str(self.locator), str(result))
+        if not result:
+            return 0
+        return int(str(result))
+
+    # class CacheSlot(object):
+    #     __slots__ = ("locator", "ready", "content", "block_cache", "_content")
+    #
+    #     # The whole thing is blocking on self.ready.wait() waiting for some external event which never comes.
+    #     def __init__(self, locator, block_cache):
+    #         print "KeepBlockCacheWithLMDB.CacheSlot.__init__()"
+    #         self.locator = locator
+    #         self.ready = threading.Event()
+    #         self.block_cache = block_cache
+    #         self._content = None
+
+
+    def get(self, locator=None):
+        print "KeepBlockCacheWithLMDB.get()"
+        if not locator:
+            locator = self.locator
+        self.ready.wait()
+        if self._content:
+            return self._content
+        else:
+            with self.lmdb_env.begin(buffers=True) as txn:
+                print "getting %s from lmdb cache" % str(locator)
+                content = txn.get(str(locator))
+                self._set_timestamp(locator)
         return bytes(content)
+        #return self.block_cache.get(self.locator)
+
+
+    # def get(self, locator):
+    #     print "In KeepBlockCacheWithLMDB.get()"
+    #     return self._get(locator)
+
+
+    # def _get(self, locator):
+    #     print "In KeepBlockCacheWithLMDB._get()"
+    #     with self.lmdb_env.begin(buffers=True) as txn:
+    #         print "getting %s from lmdb cache" % str(locator)
+    #         content = txn.get(str(locator))
+    #         self._set_timestamp(locator)
+    #     return bytes(content)
 
     def _set_timestamp(self, locator):
         with self.lmdb_env.begin(write=True, buffers=True) as txn:
@@ -312,9 +332,6 @@ class KeepBlockCacheWithLMDB:
             timestamp = txn.get(bytes(str(locator)+'_timestamp'))
         return str(timestamp)
 
-    def get(self, locator):
-        print "In KeepBlockCacheWithLMDB.get()"
-        return self._get(locator)
 
     def delete(self, locator):
         """
@@ -372,11 +389,11 @@ class KeepBlockCacheWithLMDB:
         print "KeepBlockCacheWithLMDB.reserve_cache(%s)" % (locator)
         content = self.get(locator)
         if content:
-            slot = KeepBlockCacheWithLMDB.CacheSlot(locator, self)
+            slot = KeepBlockCacheWithLMDB(locator=locator)
             slot.store_content(content)
             return slot, False
         else:
-            new_block = KeepBlockCacheWithLMDB.CacheSlot(locator, self)
+            new_block = KeepBlockCacheWithLMDB(locator=locator)
             return new_block, True
 
 
@@ -1055,9 +1072,11 @@ class KeepClient(object):
     def get_from_cache(self, loc):
         """Fetch a block only if is in the cache, otherwise return None."""
         print "KeepWriterThread.get_from_cache(%s)" % (loc)
-        slot = self.block_cache.get(loc)
-        if slot is not None and slot.ready.is_set():
-            return slot.get()
+        if self.block_cache.ready.is_set():
+            return self.block_cache.get()
+        # slot = self.block_cache.get(loc)
+        # if slot is not None and slot.ready.is_set():
+        #     return slot.get()
         else:
             return None
 
