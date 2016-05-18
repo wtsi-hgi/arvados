@@ -313,8 +313,8 @@ class KeepBlockCacheWithLMDB:
         if self._content:
             return self._content
         else:
-            self._get(locator)
-        return bytes(content)
+            return bytes(self._get(locator))
+        #return bytes(content)
 
 
     def _set_timestamp(self, locator):
