@@ -212,6 +212,201 @@ class KeepBlockCache(object):
                 self._cache.insert(0, n)
                 return n, True
 
+# TODO check if this can be imported and if so use the LMDB version, otherwise revert to old version???
+import lmdb
+import time
+import operator
+
+class KeepBlockCacheWithLMDB:
+    def __init__(self, cache_max=(10 * 1024 * 1024 * 1024), locator=None):
+        print "KeepBlockCacheWithLMDB.__init__()"
+        self.cache_max = cache_max
+        self._cache = []
+        self._cache_lock = threading.Lock()
+        lmdb_path = os.path.join(os.getenv('HOME', '/root'), '.cache/arvados/keep-lmdb')
+        lmdb_map_size = 20 * 1024 * 1024 * 1024  # 20GB for the cache itself
+        self.lmdb_env = lmdb.open(lmdb_path, writemap=True, map_size=lmdb_map_size, create=True)
+
+        self._set_total_data_size(0)
+        # Imported from CacheSlot
+        self.locator = locator
+        self.ready = threading.Event()
+        self._content = None
+
+
+    def store_content(self, content):
+        self._content = content
+
+    @property
+    def content(self):
+        print "KeepBlockCacheWithLMDB.content[get]"
+        if self._content:
+            return self._content
+        return self.get()
+
+    @content.setter
+    def content(self, value):
+        print "KeepBlockCacheWithLMDB.content[set]"
+        return self.set(value)
+
+    def set(self, value, size=None):
+        print "KeepBlockCacheWithLMDB.set()"
+        if not size:
+            # Q for Josh: what were the reasons why you weren't happy to use sys.sizeof(object)?
+            size = len(value)
+        self.cap_cache(extra_space=size)
+        with self.lmdb_env.begin(write=True, buffers=True) as txn:
+            print "putting %s to lmdb cache" % (self.locator)
+            txn.put(bytes(str(self.locator)), bytes(value))
+            txn.put(bytes(str(self.locator)+'_size'), bytes(size))
+        self._set_timestamp(self.locator)
+        self._increase_total_size_by(size)
+        self.ready.set()
+
+    def size(self):
+        print "KeepBlockCacheWithLMDB.size()"
+        with self.lmdb_env.begin(buffers=True) as txn:
+            result = txn.get(str(self.locator)+'_size')
+        print "For locator %s I've got size: %s" % (str(self.locator), str(result))
+        if not result:
+            return 0
+        return int(str(result))
+
+    # class CacheSlot(object):
+    #     __slots__ = ("locator", "ready", "content", "block_cache", "_content")
+    #
+    #     # The whole thing is blocking on self.ready.wait() waiting for some external event which never comes.
+    #     def __init__(self, locator, block_cache):
+    #         print "KeepBlockCacheWithLMDB.CacheSlot.__init__()"
+    #         self.locator = locator
+    #         self.ready = threading.Event()
+    #         self.block_cache = block_cache
+    #         self._content = None
+    def wait_and_get(self, locator):
+        self.ready.wait()
+        return self._get(locator)
+
+    def _get(self, locator):
+        with self.lmdb_env.begin(buffers=True) as txn:
+            print "getting %s from lmdb cache" % str(locator)
+            content = txn.get(str(locator))
+            if content:
+                self._set_timestamp(locator)
+            else:
+                return None
+
+    def get(self, locator=None):
+        print "KeepBlockCacheWithLMDB.get()"
+        if not locator:
+            locator = self.locator
+        #self.ready.wait()
+        if self._content:
+            return self._content
+        else:
+            return bytes(self._get(locator))
+        #return bytes(content)
+
+
+    def _set_timestamp(self, locator):
+        with self.lmdb_env.begin(write=True, buffers=True) as txn:
+            timestamps_key = str(locator)+'_timestamp'
+            txn.put(bytes(timestamps_key), bytes(time.time()))
+
+    def _get_timestamp(self, locator):
+        with self.lmdb_env.begin(buffers=True) as txn:
+            timestamp = txn.get(bytes(str(locator)+'_timestamp'))
+        return str(timestamp)
+
+
+    def delete(self, locator):
+        """
+        Deletes an element and returns the size of the element deleted.
+        :return:
+        """
+        with self.lmdb_env.begin(write=True, buffers=True) as txn:
+            size = txn.get(str(locator)+'_size')
+            txn.delete(str(locator))
+            txn.delete(str(locator)+'_timestamp')
+            txn.delete(str(locator)+'_size')
+        self._decrease_total_size_by(size)
+        return size
+
+
+    def get_total_data_size(self):
+        with self.lmdb_env.begin(buffers=True) as txn:
+            total_size = txn.get(bytes('total_size'))
+        if total_size:
+            total_size = int(total_size)
+        else:
+            total_size = 0
+        print "Total size: %s" % str(total_size)
+        return total_size
+
+    def _set_total_data_size(self, size):
+        with self.lmdb_env.begin(buffers=True, write=True) as txn:
+            txn.put(bytes('total_size'), bytes(size))
+
+    def _increase_total_size_by(self, extra_size):
+        with self.lmdb_env.begin(write=True, buffers=True) as txn:
+            total_size = txn.get(bytes('total_size'))
+            if total_size:
+                total_size = int(total_size) + extra_size
+                txn.put(bytes('total_size'), bytes(total_size))
+            else:
+                txn.put(bytes('total_size'), bytes(extra_size))
+
+    def _decrease_total_size_by(self, size):
+        with self.lmdb_env.begin(write=True, buffers=True) as txn:
+            total_size = txn.get(bytes('total_size'))
+            if total_size:
+                if total_size - size > 0:
+                    total_size -= size
+                    txn.put(bytes('total_size'), bytes(total_size))
+                else:
+                    txn.put(bytes('total_size'), bytes(0))
+                    raise ValueError("Total size doesnt add up. There might be some concurrency bugs.")
+
+
+
+    def reserve_cache(self, locator):
+        '''Reserve a cache slot for the specified locator,
+        or return the existing slot.'''
+        print "KeepBlockCacheWithLMDB.reserve_cache(%s)" % (locator)
+        content = self.get(locator)
+        if content:
+            print "There is content for this locator"
+            block = KeepBlockCacheWithLMDB(locator=locator)
+            block.store_content(content)
+            return block, False
+        else:
+            print "There is NO content for this locator, brand new block"
+            new_block = KeepBlockCacheWithLMDB(locator=locator)
+            return new_block, True
+
+
+    # This method doesn't really belong here because it doesn't handle the data of this particular CacheBlock,
+    # but instead it cleans the overall cache: deletes entries from the cache, etc..
+    def cap_cache(self, extra_space):
+        print "KeepBlockCacheWithLMDB.cap_cache()"
+        #with self._cache_lock:
+        total_size = self.get_total_data_size() + extra_space
+        if total_size > self.cache_max:
+            timestamps = {}
+            with self.lmdb_env.begin(buffers=True) as txn_env:
+                cursor = txn_env.cursor()
+                for locator, value in cursor:
+                    if str(locator).endswith('_timestamp'):
+                        data_locator = str(locator)[:-10]
+                        timestamps[data_locator] = value
+            sorted_timestamps = sorted(timestamps.items(), key=operator.itemgetter(1), reverse=True)    # (k,v) tuples
+            for locator, timestamp in sorted_timestamps:
+                elem_size = self.delete(locator)
+                total_size -= elem_size
+                if total_size < self.cache_max:
+                    break
+
+
+
 class Counter(object):
     def __init__(self, v=0):
         self._lk = threading.Lock()
@@ -480,7 +675,7 @@ class KeepClient(object):
             self._lastheadername = name
             self._headers[name] = value
             # Returning None implies all bytes were written
-    
+
 
     class KeepWriterQueue(Queue.Queue):
         def __init__(self, copies):
@@ -491,22 +686,22 @@ class KeepClient(object):
             self.successful_copies_lock = threading.Lock()
             self.pending_tries = copies
             self.pending_tries_notification = threading.Condition()
-        
+
         def write_success(self, response, replicas_nr):
             with self.successful_copies_lock:
                 self.successful_copies += replicas_nr
                 self.response = response
-        
+
         def write_fail(self, ks, status_code):
             with self.pending_tries_notification:
                 self.pending_tries += 1
                 self.pending_tries_notification.notify()
-        
+
         def pending_copies(self):
             with self.successful_copies_lock:
                 return self.wanted_copies - self.successful_copies
-    
-    
+
+
     class KeepWriterThreadPool(object):
         def __init__(self, data, data_hash, copies, max_service_replicas, timeout=None):
             self.total_task_nr = 0
@@ -522,14 +717,14 @@ class KeepClient(object):
             for _ in range(num_threads):
                 w = KeepClient.KeepWriterThread(self.queue, data, data_hash, timeout)
                 self.workers.append(w)
-        
+
         def add_task(self, ks, service_root):
             self.queue.put((ks, service_root))
             self.total_task_nr += 1
-        
+
         def done(self):
             return self.queue.successful_copies
-        
+
         def join(self):
             # Start workers
             for worker in self.workers:
@@ -540,11 +735,11 @@ class KeepClient(object):
                 self.queue.pending_tries_notification.notify_all()
             for worker in self.workers:
                 worker.join()
-        
+
         def response(self):
             return self.queue.response
-    
-    
+
+
     class KeepWriterThread(threading.Thread):
         def __init__(self, queue, data, data_hash, timeout=None):
             super(KeepClient.KeepWriterThread, self).__init__()
@@ -552,7 +747,7 @@ class KeepClient(object):
             self.queue = queue
             self.data = data
             self.data_hash = data_hash
-        
+
         def run(self):
             while not self.queue.empty():
                 if self.queue.pending_copies() > 0:
@@ -585,7 +780,7 @@ class KeepClient(object):
                             replicas_stored = int(result['headers']['x-keep-replicas-stored'])
                         except (KeyError, ValueError):
                             replicas_stored = 1
-                        
+
                         self.queue.write_success(result['body'].strip(), replicas_stored)
                     else:
                         if result.get('status_code', None):
@@ -677,7 +872,7 @@ class KeepClient(object):
         if local_store is None:
             local_store = os.environ.get('KEEP_LOCAL_STORE')
 
-        self.block_cache = block_cache if block_cache else KeepBlockCache()
+        self.block_cache = block_cache if block_cache else KeepBlockCacheWithLMDB()
         self.timeout = timeout
         self.proxy_timeout = proxy_timeout
         self._user_agent_pool = Queue.LifoQueue()
@@ -1042,7 +1237,7 @@ class KeepClient(object):
                 loop.save_result(error)
                 continue
 
-            writer_pool = KeepClient.KeepWriterThreadPool(data=data, 
+            writer_pool = KeepClient.KeepWriterThreadPool(data=data,
                                                         data_hash=data_hash,
                                                         copies=copies - done,
                                                         max_service_replicas=self.max_replicas_per_service,
