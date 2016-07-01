@@ -169,9 +169,10 @@ class KeepBlockCache(object):
         @abstractmethod
         def get(self):
             """
-            Gets this cache slot's contents.
-            :return: the contents else `None` if not set before
-            :rtype: bytearray
+            Gets this cache slot's contents. If the contents are not set, it
+            will block until they are.
+            :return: the contents
+            :rtype bytearray
             """
 
         @abstractmethod
