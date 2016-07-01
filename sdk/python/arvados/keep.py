@@ -170,7 +170,7 @@ class KeepBlockCache(object):
         def get(self):
             """
             Gets this cache slot's contents.
-            :return: the contents
+            :return: the contents else `None` if not set before
             :rtye bytearray
             """
 
@@ -224,7 +224,8 @@ class KeepBlockCache(object):
     @abstractmethod
     def reserve_cache(self, locator):
         """
-        Reserves a cache slot for the given locator or return the existing slot.
+        Reserves a cache slot for the given locator or return the existing slot
+        associated with the given identifier.
         :param locator: the identifier of the entry in this cache
         :type locator: sting
         :return: a tuple containing the reserved cache slot as the first element
