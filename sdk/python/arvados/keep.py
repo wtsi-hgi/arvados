@@ -12,7 +12,7 @@ import socket
 import ssl
 import threading
 import time
-from abc import ABCMeta
+from abc import ABCMeta, abstractmethod
 
 import lmdb
 
@@ -166,6 +166,7 @@ class KeepBlockCache(object):
             """
             self.locator = locator
 
+        @abstractmethod
         def get(self):
             """
             Gets this cache slot's contents.
@@ -173,6 +174,7 @@ class KeepBlockCache(object):
             :rtye bytearray
             """
 
+        @abstractmethod
         def set(self, value):
             """
             Sets this cache slot's contents to the given value and marks slot as
@@ -181,6 +183,7 @@ class KeepBlockCache(object):
             :rtype: bytearray
             """
 
+        @abstractmethod
         def size(self):
             """
             The size of this slot's contents. Will return 0 if contents is
@@ -208,6 +211,7 @@ class KeepBlockCache(object):
         """
         return self._cache_max
 
+    @abstractmethod
     def get(self, locator):
         """
         Gets the cache slot with the given locator.
@@ -217,6 +221,7 @@ class KeepBlockCache(object):
         :rtype: Optional[KeepBlockCache.CacheSlot]
         """
 
+    @abstractmethod
     def reserve_cache(self, locator):
         """
         Reserves a cache slot for the given locator or return the existing slot.
@@ -227,6 +232,7 @@ class KeepBlockCache(object):
         :rtype: Tuple[CacheSlot, bool]
         """
 
+    @abstractmethod
     def cap_cache(self):
         """
         Caps the cache size to `self.cache_max` by removing entries from the
