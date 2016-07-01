@@ -171,7 +171,7 @@ class KeepBlockCache(object):
             """
             Gets this cache slot's contents.
             :return: the contents else `None` if not set before
-            :rtye bytearray
+            :rtype: bytearray
             """
 
         @abstractmethod
