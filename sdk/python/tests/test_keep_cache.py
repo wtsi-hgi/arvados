@@ -2,6 +2,9 @@ import shutil
 import unittest
 from abc import ABCMeta, abstractmethod
 from tempfile import mkdtemp
+from threading import Lock, Thread, Semaphore
+
+from mock import MagicMock, patch
 
 from arvados.keep_cache import BasicKeepBlockCache, \
     KeepBlockCacheWithLMDB, CacheSlot
@@ -119,6 +122,11 @@ class TestKeepBlockCacheWithLMDB(TestKeepBlockCache):
         existing_slot.set(_CONTENTS)
         slot = self.cache.get(_LOCATOR_1)
         self.assertEqual(_CONTENTS, slot.get())
+
+    def test_create_cache_slot_when_reference_exists(self):
+        slot_1 = self.cache.create_cache_slot(_LOCATOR_1, _CONTENTS)
+        slot_2 = self.cache.create_cache_slot(_LOCATOR_1, bytearray(0))
+        self.assertEqual(id(slot_1), id(slot_2))
 
     def _create_cache(self, cache_size):
         return KeepBlockCacheWithLMDB(cache_size, self.database_directory)
