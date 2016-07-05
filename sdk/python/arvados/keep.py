@@ -17,7 +17,7 @@ import arvados.errors
 import arvados.retry as retry
 import arvados.util
 import timer
-from arvados.keep_cache import KeepBlockCacheWithLMDB
+from arvados.keep_cache import KeepBlockCacheWithBlockStore
 
 _logger = logging.getLogger('arvados.keep')
 global_client_object = None
@@ -607,7 +607,7 @@ class KeepClient(object):
         if local_store is None:
             local_store = os.environ.get('KEEP_LOCAL_STORE')
 
-        self.block_cache = block_cache if block_cache else KeepBlockCacheWithLMDB()
+        self.block_cache = block_cache if block_cache else KeepBlockCacheWithBlockStore()
         self.timeout = timeout
         self.proxy_timeout = proxy_timeout
         self._user_agent_pool = Queue.LifoQueue()

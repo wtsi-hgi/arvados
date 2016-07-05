@@ -8,7 +8,7 @@ import lmdb
 from mock import patch, MagicMock
 
 from arvados.keep_cache import InMemoryKeepBlockCache, \
-    KeepBlockCacheWithLMDB, CacheSlot
+    KeepBlockCacheWithBlockStore, CacheSlot, LMDBBlockStore
 
 _LOCATOR_1 = "3b83ef96387f14655fc854ddc3c6bd57"
 _LOCATOR_2 = "73f1eb20517c55bf9493b7dd6e480788"
@@ -105,7 +105,7 @@ class TestInMemoryKeepBlockCache(TestKeepBlockCache):
 
 class TestKeepBlockCacheWithLMDB(TestKeepBlockCache):
     """
-    Tests for `KeepBlockCacheWithLMDB`.
+    Tests for `KeepBlockCacheWithBlockStore`.
     """
     def setUp(self):
         self.database_directory = mkdtemp()
@@ -165,7 +165,8 @@ class TestKeepBlockCacheWithLMDB(TestKeepBlockCache):
         self.assertLessEqual(len(slot_1.content), 2)
 
     def _create_cache(self, cache_size):
-        return KeepBlockCacheWithLMDB(cache_size, self.database_directory)
+        block_store = LMDBBlockStore(self.database_directory, cache_size)
+        return KeepBlockCacheWithBlockStore(block_store, cache_size)
 
 
 # Work around to stop unittest from trying to run the abstract base class

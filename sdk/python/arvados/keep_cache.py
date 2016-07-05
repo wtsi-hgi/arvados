@@ -211,39 +211,97 @@ class InMemoryKeepBlockCache(KeepBlockCache):
                 return n, True
 
 
-class KeepBlockCacheWithLMDB(KeepBlockCache):
+class BlockStore:
     """
     TODO
     """
-    # os.getenv('HOME', '/root')
-    def __init__(self, cache_max=20 * 1024 * 1024 * 1024,
-                 database_directory="/tmp/db"):
+    def get(self, id):
         """
         TODO
-
-        The database should only be used by this cache.
-        :param cache_max: maximum cache size (default: 20GB)
+        :param id:
+        :return:
         """
-        super(KeepBlockCacheWithLMDB, self).__init__(cache_max)
-        self._database = lmdb.open(database_directory, writemap=True,
-                                   map_size=self.cache_max)
-        self._referenced_cache_slots = WeakValueDictionary()
-        self._referenced_cache_slots_lock = threading.Lock()
-        self._temp_fifo = []
-        self._cache_size = self._calculate_cache_size()
-        self._cache_size_lock = threading.Lock()
-        self._writing = set()
-        self._writing_lock = threading.Lock()
-        self._writing_complete_listeners = defaultdict(set)
 
-    @property
-    def cache_size(self):
+    def put(self, id, content):
         """
-        Gets the total size of the cache.
+        TODO
+        :param id:
+        :param content:
+        """
+
+    def delete(self, id):
+        """
+        TODO
+        :param id:
+        """
+
+    def total_size(self):
+        """
+        Gets the total size of this cache.
         :return: the size of the cache in bytes
         :rtype: int
         """
-        return self._cache_size
+
+
+class LMDBBlockStore(BlockStore):
+    """
+    TODO
+    """
+    def __init__(self, directory, map_size):
+        """
+        Constructor.
+        :param directory: the directory to use for the database (will create if
+        does not already exist else will use pre-existing). This database must
+        be used only by this store.
+        :type directory: str
+        :param map_size: maximum size that the database can grow to in bytes
+        :type map_size: int
+        """
+        self._database = lmdb.open(directory, writemap=True, map_size=map_size)
+
+    def get(self, id):
+        with self._database.begin(buffers=True) as transaction:
+            return transaction.get(id)
+
+    def put(self, id, content):
+        with self._database.begin(write=True) as transaction:
+            transaction.put(id, content)
+
+    def delete(self, id):
+        with self._database.begin(write=True) as transaction:
+            transaction.delete(id)
+
+    def total_size(self):
+        # FIXME: This horrific method of finding the total size of the database
+        # has to change
+        total_size = 0
+        with self._database.begin() as transaction:
+            cursor = transaction.cursor()
+            for key, value in cursor:
+                total_size += len(value)
+        return total_size
+
+
+class KeepBlockCacheWithBlockStore(KeepBlockCache):
+    """
+    TODO
+    """
+    def __init__(self, block_store, cache_max=20 * 1024 * 1024 * 1024):
+        """
+        Constructor.
+        :param block_store: TODO
+        :param cache_max: maximum cache size (default: 20GB)
+        """
+        super(KeepBlockCacheWithBlockStore, self).__init__(cache_max)
+        self._block_store = block_store
+        self._referenced_cache_slots = WeakValueDictionary()
+        self._referenced_cache_slots_lock = threading.Lock()
+        self._writing = set()
+        self._writing_lock = threading.Lock()
+        self._writing_complete_listeners = defaultdict(set)
+        self._reserved_space = 0
+        self._space_increase_lock = threading.Lock()
+        self._temp_fifo = []
 
     def get(self, locator):
         # Return pre-existing model of slot if referenced elsewhere. This is
@@ -254,8 +312,7 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         if slot is not None:
             return slot
         else:
-            with self._database.begin(buffers=True) as transaction:
-                content = transaction.get(locator)
+            content = self._block_store.get(locator)
             if content is None:
                 return None
             else:
@@ -272,7 +329,7 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         # Given that the cache in this implementation does not grow beyond its
         # allocated size, this operation to trim the cache back down to size
         # should be a noop.
-        assert self.cache_size <= self.cache_max
+        assert self._block_store.total_size() <= self.cache_max
 
     def create_cache_slot(self, locator, content=None):
         """
@@ -303,23 +360,6 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
                 slot.set(content)
             return slot
 
-    def _calculate_cache_size(self):
-        """
-        Calculates the size of this cache by (expensively) iterating through all
-        values in the database.
-        :return: the size (in bytes) of the cache
-        :rtype: int
-        """
-        # FIXME: This is a horrific way of caculating this
-        total_size = 0
-        with self._database.begin() as transaction:
-            cursor = transaction.cursor()
-            for key, value in cursor:
-                total_size += len(value)
-                # FIXME: temp only
-                self._temp_fifo.append(key)
-        return total_size
-
     def _get_content(self, locator):
         """
         Gets the content associated with the given locator.
@@ -328,8 +368,7 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         :return: the content associated to the locator or `None` if not set
         :rtype: Optional[bytearray]
         """
-        with self._database.begin(buffers=True) as transaction:
-            return transaction.get(locator)
+        return self._block_store.get(locator)
 
     def _set_content(self, locator, content):
         """
@@ -369,8 +408,8 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
                 # likely at this point that the content has already been written
 
         self._reserve_space_in_cache(len(content))
-        with self._database.begin(write=True, buffers=True) as transaction:
-            transaction.put(locator, content)
+        self._block_store.put(locator, content)
+        self._reserved_space -= len(content)
         self._temp_fifo.append(locator)
 
         with self._writing_lock:
@@ -392,37 +431,46 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
             raise ValueError("Cannot reserve more space in the cache than the "
                              "size of the cache")
 
-        with self._cache_size_lock:
-            spare_capacity = self.cache_max - self.cache_size
-            assert spare_capacity >= 0
-            if spare_capacity < space:
-                self._free_space_in_cache(space - spare_capacity)
-                assert self.cache_max - self.cache_size >= space
-            self._cache_size += space
+        with self._space_increase_lock:
+            spare_capacity = self._get_space_capacity()
+            if space > spare_capacity:
+                reserve = space - spare_capacity
+                self._free_space_in_cache(reserve)
+                self._reserved_space += reserve
 
     def _free_space_in_cache(self, space):
         """
         Frees the given amount of space in the cache by deleting entries.
 
-        This method cannot guarantee that the space will be free at the point of
-        return: external control of this method is required for that.
+        This method can only guarantee that the required space was free during
+        execution: it does not however reserve the space.
         :param space: the amount of space to free (in bytes)
         """
         write_wait = threading.Semaphore(0)
-        with self.database.begin(write=True, buffers=True) as transaction:
-            while self.cache_size < space:
-                if len(self._temp_fifo) > 0:
-                    locator = self._temp_fifo.pop(0)
-                    content = transaction.get(locator)
-                    transaction.delete(locator)
-                    self._cache_size -= len(content)
-                else:
-                    # Space has been allocated for content that is not written
-                    # yet
-                    with self._writing_lock:
-                        for locator in self._writing:
-                            if write_wait not in self._writing_complete_listeners[locator]:
-                                self._writing_complete_listeners.append(write_wait)
-                    # Wait for something to be written to cache so that it can
-                    # be deleted and the space can be reclaimed
-                    write_wait.acquire()
+        while space > self._get_space_capacity():
+            if len(self._temp_fifo) > 0:
+                locator = self._temp_fifo.pop(0)
+                self._block_store.delete(locator)
+            else:
+                # Space has been allocated for content that is not written yet
+                with self._writing_lock:
+                    for locator in self._writing:
+                        if write_wait not in self._writing_complete_listeners[locator]:
+                            self._writing_complete_listeners.append(write_wait)
+                # Wait for something to be written to cache so that it can
+                # be deleted and the space can be reclaimed
+                write_wait.acquire()
+
+    def _get_space_capacity(self):
+        """
+        Gets the space capacity in the cache, defined as the maximum space minus
+        the size of the block store, minus the reserved amount.
+
+        It is possible for this to be an underestimate as the reserve space is
+        not returned at exactly the same time that the content is inserted into
+        the store.
+        :return: the space capacity in bytes
+        :rtype: int
+        """
+        return self.cache_max - (self._block_store.total_size()
+                                 + self._reserved_space)
