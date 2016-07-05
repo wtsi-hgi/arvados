@@ -160,9 +160,9 @@ class KeepBlockCache(object):
         """
 
 
-class BasicKeepBlockCache(KeepBlockCache):
+class InMemoryKeepBlockCache(KeepBlockCache):
     def __init__(self, cache_max=(256 * 1024 * 1024)):
-        super(BasicKeepBlockCache, self).__init__(cache_max)
+        super(InMemoryKeepBlockCache, self).__init__(cache_max)
         self.cache_size = cache_max
         self._cache = []
         self._cache_lock = threading.Lock()
@@ -225,8 +225,8 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         :param cache_max: maximum cache size (default: 20GB)
         """
         super(KeepBlockCacheWithLMDB, self).__init__(cache_max)
-        self.database = lmdb.open(database_directory, writemap=True,
-                                  map_size=self.cache_max)
+        self._database = lmdb.open(database_directory, writemap=True,
+                                   map_size=self.cache_max)
         self._referenced_cache_slots = WeakValueDictionary()
         self._referenced_cache_slots_lock = threading.Lock()
         self._temp_fifo = []
@@ -254,7 +254,7 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         if slot is not None:
             return slot
         else:
-            with self.database.begin(buffers=True) as transaction:
+            with self._database.begin(buffers=True) as transaction:
                 content = transaction.get(locator)
             if content is None:
                 return None
@@ -312,7 +312,7 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         """
         # FIXME: This is a horrific way of caculating this
         total_size = 0
-        with self.database.begin() as transaction:
+        with self._database.begin() as transaction:
             cursor = transaction.cursor()
             for key, value in cursor:
                 total_size += len(value)
@@ -328,7 +328,7 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         :return: the content associated to the locator or `None` if not set
         :rtype: Optional[bytearray]
         """
-        with self.database.begin(buffers=True) as transaction:
+        with self._database.begin(buffers=True) as transaction:
             return transaction.get(locator)
 
     def _set_content(self, locator, content):
@@ -338,7 +338,7 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
         There will be a race condition if there are concurrent requests to write
         different content for the same locator. Given that the locator is a hash
         of the contents, it is highly unlikely that such condition will occur.
-        Given that `BasicKeepBlockCache` also suffers from this race condition,
+        Given that `InMemoryKeepBlockCache` also suffers from this race condition,
         it is assumed that it is safe to ignore it.
         :param locator: content identifier
         :type locator: str
@@ -369,7 +369,7 @@ class KeepBlockCacheWithLMDB(KeepBlockCache):
                 # likely at this point that the content has already been written
 
         self._reserve_space_in_cache(len(content))
-        with self.database.begin(write=True, buffers=True) as transaction:
+        with self._database.begin(write=True, buffers=True) as transaction:
             transaction.put(locator, content)
         self._temp_fifo.append(locator)
 

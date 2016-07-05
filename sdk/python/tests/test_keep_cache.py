@@ -4,9 +4,10 @@ from abc import ABCMeta, abstractmethod
 from tempfile import mkdtemp
 from threading import Lock, Thread, Semaphore
 
-from mock import MagicMock, patch
+import lmdb
+from mock import patch, MagicMock
 
-from arvados.keep_cache import BasicKeepBlockCache, \
+from arvados.keep_cache import InMemoryKeepBlockCache, \
     KeepBlockCacheWithLMDB, CacheSlot
 
 _LOCATOR_1 = "3b83ef96387f14655fc854ddc3c6bd57"
@@ -57,7 +58,9 @@ class TestKeepBlockCache(unittest.TestCase):
         self.assertIsNone(self.cache.get("other"))
 
     def test_get_when_set(self):
+        self.cache.reserve_cache("other_1")
         existing_slot, _ = self.cache.reserve_cache(_LOCATOR_1)
+        self.cache.reserve_cache("other_2")
         slot = self.cache.get(existing_slot.locator)
         # Checking for identity equality because `CacheSlot`'s blocking `get`
         # method implies only one model of a cache slot for a given locator
@@ -84,9 +87,9 @@ class TestKeepBlockCache(unittest.TestCase):
         self.assertEqual(slot, self.cache.get(slot.locator))
 
 
-class TestBasicKeepBlockCache(TestKeepBlockCache):
+class TestInMemoryKeepBlockCache(TestKeepBlockCache):
     """
-    Tests for `BasicKeepBlockCache`.
+    Tests for `InMemoryKeepBlockCache`.
     """
     def test_cap_cache_when_over_max_cache_size(self):
         # This test is not universal for all `KeepBlockCache` implementations
@@ -97,7 +100,7 @@ class TestBasicKeepBlockCache(TestKeepBlockCache):
         self.assertIsNone(self.cache.get(slot.locator))
 
     def _create_cache(self, cache_size):
-        return BasicKeepBlockCache(cache_size)
+        return InMemoryKeepBlockCache(cache_size)
 
 
 class TestKeepBlockCacheWithLMDB(TestKeepBlockCache):
@@ -111,7 +114,7 @@ class TestKeepBlockCacheWithLMDB(TestKeepBlockCache):
     def tearDown(self):
         shutil.rmtree(self.database_directory)
 
-    def test_cap_cache_when_over_max_cache_size(self):
+    def test_set_content_to_more_than_max_size(self):
         slot, _ = self.cache.reserve_cache(_LOCATOR_1)
         self.assertRaises(ValueError, slot.set, bytearray(_CACHE_SIZE + 1))
 
@@ -127,6 +130,39 @@ class TestKeepBlockCacheWithLMDB(TestKeepBlockCache):
         slot_1 = self.cache.create_cache_slot(_LOCATOR_1, _CONTENTS)
         slot_2 = self.cache.create_cache_slot(_LOCATOR_1, bytearray(0))
         self.assertEqual(id(slot_1), id(slot_2))
+
+    @patch("lmdb.open")
+    def test_concurrent_set_for_same_locator(self, lmdb_open):
+        puts = []
+        puts_lock = Lock()
+        continue_lock = Lock()
+        continue_lock.acquire()
+        continued = Semaphore(0)
+
+        def pause_put(*args, **kwargs):
+            # The joys of using a version of Python that was outmoded in 2008...
+            # http://stackoverflow.com/questions/3190706/nonlocal-keyword-in-python-2-x
+            with puts_lock:
+                puts.append(True)
+                pause = len(puts) == 1
+            if pause:
+                continue_lock.acquire()
+            continued.release()
+
+        lmdb_open().begin().__enter__().put = MagicMock(side_effect=pause_put)
+
+        cache = self._create_cache(_CACHE_SIZE)
+        slot_1, _ = cache.reserve_cache(_LOCATOR_1)
+        slot_2, _ = cache.reserve_cache(_LOCATOR_2)
+        Thread(target=slot_1.set, args=(bytearray(1),)).start()
+        Thread(target=slot_1.set, args=(bytearray(2),)).start()
+        Thread(target=slot_2.set, args=(bytearray(3),)).start()
+        continue_lock.release()
+
+        while len(puts) != 3:
+            continued.acquire()
+        # No guarantees on value of slot contents after race condition!
+        self.assertLessEqual(len(slot_1.content), 2)
 
     def _create_cache(self, cache_size):
         return KeepBlockCacheWithLMDB(cache_size, self.database_directory)
