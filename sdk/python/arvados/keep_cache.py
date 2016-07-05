@@ -213,26 +213,32 @@ class InMemoryKeepBlockCache(KeepBlockCache):
 
 class BlockStore:
     """
-    TODO
+    Simple store for blocks.
     """
-    def get(self, id):
+    def get(self, locator):
         """
-        TODO
-        :param id:
-        :return:
-        """
-
-    def put(self, id, content):
-        """
-        TODO
-        :param id:
-        :param content:
+        Gets the block with the given locator from this store.
+        :param locator: the identifier of the block to get
+        :type locator: str
+        :return: the block else `None` if not found
         """
 
-    def delete(self, id):
+    def put(self, locator, content):
         """
-        TODO
-        :param id:
+        Puts the given content into this store for the block with the given
+        locator.
+        :param locator: the identifier of the block
+        :type locator: str
+        :param content: the block content
+        :type content: bytearray
+        """
+
+    def delete(self, locator):
+        """
+        Deletes the block with the given locator from this store. No-op if the
+        block does not exist.
+        :param locator: the block identifier
+        :type locator: str
         """
 
     def total_size(self):
@@ -245,7 +251,7 @@ class BlockStore:
 
 class LMDBBlockStore(BlockStore):
     """
-    TODO
+    Simple block store backed by a Lightning Memory-Mapped Database (LMDB).
     """
     def __init__(self, directory, map_size):
         """
@@ -259,17 +265,17 @@ class LMDBBlockStore(BlockStore):
         """
         self._database = lmdb.open(directory, writemap=True, map_size=map_size)
 
-    def get(self, id):
+    def get(self, locator):
         with self._database.begin(buffers=True) as transaction:
-            return transaction.get(id)
+            return transaction.get(locator)
 
-    def put(self, id, content):
+    def put(self, locator, content):
         with self._database.begin(write=True) as transaction:
-            transaction.put(id, content)
+            transaction.put(locator, content)
 
-    def delete(self, id):
+    def delete(self, locator):
         with self._database.begin(write=True) as transaction:
-            transaction.delete(id)
+            transaction.delete(locator)
 
     def total_size(self):
         # FIXME: This horrific method of finding the total size of the database
@@ -284,12 +290,12 @@ class LMDBBlockStore(BlockStore):
 
 class KeepBlockCacheWithBlockStore(KeepBlockCache):
     """
-    TODO
+    Keep block cache backed by a block store, which can hold blocks in any way.
     """
     def __init__(self, block_store, cache_max=20 * 1024 * 1024 * 1024):
         """
         Constructor.
-        :param block_store: TODO
+        :param block_store: store for blocks
         :param cache_max: maximum cache size (default: 20GB)
         """
         super(KeepBlockCacheWithBlockStore, self).__init__(cache_max)
