@@ -10,7 +10,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 
-class BlockStoreUsageRecoder:
+class BlockStoreUsageRecorder:
     """
     Recorder for the usage of a block store.
     """
@@ -94,27 +94,27 @@ class BlockStoreUsageRecoder:
         return datetime.now()
 
 
-class DatabaseBlockStoreUsageRecoder(BlockStoreUsageRecoder):
+class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
     """
     Recorder for usage of a block store where records are kept in a database.
     """
     SQLAlchemyModel = declarative_base()
 
-    class _Record(SQLAlchemyModel, BlockStoreUsageRecoder.Record):
+    class _Record(SQLAlchemyModel, BlockStoreUsageRecorder.Record):
         __abstract__ = True
-        __tablename__ = BlockStoreUsageRecoder.Record.__name__
+        __tablename__ = BlockStoreUsageRecorder.Record.__name__
         locator = Column(String, primary_key=True)
         timestamp = Column(DateTime)
 
-    class _PutRecord(_Record, BlockStoreUsageRecoder.PutRecord):
-        __tablename__ = BlockStoreUsageRecoder.PutRecord.__name__
+    class _PutRecord(_Record, BlockStoreUsageRecorder.PutRecord):
+        __tablename__ = BlockStoreUsageRecorder.PutRecord.__name__
         size = Column(Integer)
 
-    class _GetRecord(_Record, BlockStoreUsageRecoder.GetRecord):
-        __tablename__ = BlockStoreUsageRecoder.GetRecord.__name__
+    class _GetRecord(_Record, BlockStoreUsageRecorder.GetRecord):
+        __tablename__ = BlockStoreUsageRecorder.GetRecord.__name__
 
-    class _DeleteRecord(_Record, BlockStoreUsageRecoder.DeleteRecord):
-        __tablename__ = BlockStoreUsageRecoder.DeleteRecord.__name__
+    class _DeleteRecord(_Record, BlockStoreUsageRecorder.DeleteRecord):
+        __tablename__ = BlockStoreUsageRecorder.DeleteRecord.__name__
 
     def __init__(self, database_location):
         """
@@ -123,7 +123,7 @@ class DatabaseBlockStoreUsageRecoder(BlockStoreUsageRecoder):
         :type database_location: str
         """
         engine = create_engine(database_location)
-        DatabaseBlockStoreUsageRecoder.SQLAlchemyModel.metadata.create_all(
+        DatabaseBlockStoreUsageRecorder.SQLAlchemyModel.metadata.create_all(
             bind=engine)
         Session = sessionmaker(bind=engine)
         self._database = Session()
@@ -133,18 +133,18 @@ class DatabaseBlockStoreUsageRecoder(BlockStoreUsageRecoder):
 
     def record_get(self, locator):
         record = self._create_record(
-            DatabaseBlockStoreUsageRecoder._GetRecord, locator)
+            DatabaseBlockStoreUsageRecorder._GetRecord, locator)
         self._store(record)
 
     def record_put(self, locator, content_size):
         record = self._create_record(
-            DatabaseBlockStoreUsageRecoder._PutRecord, locator)
+            DatabaseBlockStoreUsageRecorder._PutRecord, locator)
         record.size = content_size
         self._store(record)
 
     def record_delete(self, locator):
         record = self._create_record(
-            DatabaseBlockStoreUsageRecoder._DeleteRecord, locator)
+            DatabaseBlockStoreUsageRecorder._DeleteRecord, locator)
         self._store(record)
 
     def _create_record(self, cls, locator):
@@ -242,7 +242,7 @@ class RecordingBlockStore(BlockStore):
         :param block_store: the block store to record use of
         :type block_store: BlockStore
         :param block_store_usage_recorder: TODO
-        :type block_store_usage_recorder: BlockStoreUsageRecoder
+        :type block_store_usage_recorder: BlockStoreUsageRecorder
         """
         self._block_store = block_store
         self.recorder = block_store_usage_recorder

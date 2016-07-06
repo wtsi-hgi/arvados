@@ -8,7 +8,7 @@ from mock import patch, MagicMock
 
 from arvados.keep_cache import InMemoryKeepBlockCache, \
     KeepBlockCacheWithBlockStore, CacheSlot, LMDBBlockStore, \
-    DatabaseBlockStoreUsageRecoder, RecordingBlockStore
+    DatabaseBlockStoreUsageRecorder, RecordingBlockStore
 
 _LOCATOR_1 = "3b83ef96387f14655fc854ddc3c6bd57"
 _LOCATOR_2 = "73f1eb20517c55bf9493b7dd6e480788"
@@ -168,7 +168,7 @@ class TestKeepBlockCacheWithLMDB(TestKeepBlockCache):
         block_store = RecordingBlockStore(
             LMDBBlockStore(self.working_directory, cache_size),
             # FIXME: Path separator
-            DatabaseBlockStoreUsageRecoder(
+            DatabaseBlockStoreUsageRecorder(
                 "sqlite:///%s/usage.db" % self.working_directory)
         )
         return KeepBlockCacheWithBlockStore(block_store, cache_size)
