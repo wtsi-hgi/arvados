@@ -1,9 +1,265 @@
 import threading
-from abc import ABCMeta, abstractmethod
+from abc import ABCMeta, abstractmethod, abstractproperty
 from collections import defaultdict
+from datetime import datetime
 from weakref import WeakValueDictionary
 
 import lmdb
+from sqlalchemy import Column, DateTime, String, Integer, create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+
+
+class BlockStoreUsageRecoder:
+    """
+    Recorder for the usage of a block store.
+    """
+    __metaclass__ = ABCMeta
+
+    class Record:
+        """
+        TODO
+        """
+        @abstractproperty
+        def locator(self):
+            """
+            TODO
+            :return:
+            """
+
+        @abstractproperty
+        def timestamp(self):
+            """
+            TODO
+            :return:
+            """
+
+    class PutRecord(Record):
+        """
+        TODO
+        """
+        @abstractproperty
+        def size(self):
+            """
+            TODO
+            :return:
+            """
+
+    class GetRecord(Record):
+        """
+        TODO
+        """
+
+    class DeleteRecord(Record):
+        """
+        TODO
+        """
+
+    def get_size(self):
+        """
+        Gets the current (known) size of the block store.
+        :return: the current size of the block store in bytes
+        :rtype: int
+        """
+
+    def record_get(self, locator):
+        """
+        Records an access to the block in the store with the given locator.
+        :param locator: the block identifier
+        """
+
+    def record_put(self, locator, content_size):
+        """
+        Records the writing of content of the the given size as the block with
+        the given locator
+        :param locator: the block identifier
+        :type locator: str
+        :param content_size: the size of the block content
+        :type content_size: int
+        """
+
+    def record_delete(self, locator):
+        """
+        Records the deletion of the block with the given locator.
+        :param locator: the block identifier
+        :type locator: str
+        """
+
+    def _get_current_timestamp(self):
+        """
+        Gets the current timestamp.
+        :return: the current timestamp
+        :rtype: datetime
+        """
+        return datetime.now()
+
+
+class DatabaseBlockStoreUsageRecoder(BlockStoreUsageRecoder):
+    """
+    Recorder for usage of a block store where records are kept in a database.
+    """
+    SQLAlchemyModel = declarative_base()
+
+    class _Record(SQLAlchemyModel, BlockStoreUsageRecoder.Record):
+        __abstract__ = True
+        __tablename__ = BlockStoreUsageRecoder.Record.__name__
+        locator = Column(String, primary_key=True)
+        timestamp = Column(DateTime)
+
+    class _PutRecord(_Record, BlockStoreUsageRecoder.PutRecord):
+        __tablename__ = BlockStoreUsageRecoder.PutRecord.__name__
+        size = Column(Integer)
+
+    class _GetRecord(_Record, BlockStoreUsageRecoder.GetRecord):
+        __tablename__ = BlockStoreUsageRecoder.GetRecord.__name__
+
+    class _DeleteRecord(_Record, BlockStoreUsageRecoder.DeleteRecord):
+        __tablename__ = BlockStoreUsageRecoder.DeleteRecord.__name__
+
+    def __init__(self, database_location):
+        """
+        Constructor.
+        :param database_location: the location of the database
+        :type database_location: str
+        """
+        engine = create_engine(database_location)
+        DatabaseBlockStoreUsageRecoder.SQLAlchemyModel.metadata.create_all(
+            bind=engine)
+        Session = sessionmaker(bind=engine)
+        self._database = Session()
+
+    def get_size(self):
+        pass
+
+    def record_get(self, locator):
+        record = self._create_record(
+            DatabaseBlockStoreUsageRecoder._GetRecord, locator)
+        self._store(record)
+
+    def record_put(self, locator, content_size):
+        record = self._create_record(
+            DatabaseBlockStoreUsageRecoder._PutRecord, locator)
+        record.size = content_size
+        self._store(record)
+
+    def record_delete(self, locator):
+        record = self._create_record(
+            DatabaseBlockStoreUsageRecoder._DeleteRecord, locator)
+        self._store(record)
+
+    def _create_record(self, cls, locator):
+        """
+        TODO
+        :param cls:
+        :param locator:
+        :return:
+        """
+        record = cls()
+        record.locator = locator
+        record.timestamp = self._get_current_timestamp()
+        return record
+
+    def _store(self, record):
+        """
+        TODO
+        :param record:
+        :return:
+        """
+        self._database.add(record)
+        self._database.commit()
+
+
+class BlockStore:
+    """
+    Simple store for blocks.
+    """
+    __metaclass__ = ABCMeta
+
+    def get(self, locator):
+        """
+        Gets the block with the given locator from this store.
+        :param locator: the identifier of the block to get
+        :type locator: str
+        :return: the block else `None` if not found
+        """
+
+    def put(self, locator, content):
+        """
+        Puts the given content into this store for the block with the given
+        locator.
+        :param locator: the identifier of the block
+        :type locator: str
+        :param content: the block content
+        :type content: bytearray
+        """
+
+    def delete(self, locator):
+        """
+        Deletes the block with the given locator from this store. No-op if the
+        block does not exist.
+        :param locator: the block identifier
+        :type locator: str
+        """
+
+
+class LMDBBlockStore(BlockStore):
+    """
+    Simple block store backed by a Lightning Memory-Mapped Database (LMDB).
+    """
+    def __init__(self, directory, map_size):
+        """
+        Constructor.
+        :param directory: the directory to use for the database (will create if
+        does not already exist else will use pre-existing). This database must
+        be used only by this store.
+        :type directory: str
+        :param map_size: maximum size that the database can grow to in bytes
+        :type map_size: int
+        """
+        self._database = lmdb.open(directory, writemap=True, map_size=map_size)
+
+    def get(self, locator):
+        with self._database.begin(buffers=True) as transaction:
+            return transaction.get(locator)
+
+    def put(self, locator, content):
+        with self._database.begin(write=True) as transaction:
+            transaction.put(locator, content)
+
+    def delete(self, locator):
+        with self._database.begin(write=True) as transaction:
+            transaction.delete(locator)
+
+
+class RecordingBlockStore(BlockStore):
+    """
+    Block store that records accesses and modifications to entries in a block
+    store.
+    """
+    def __init__(self, block_store, block_store_usage_recorder):
+        """
+        Constructor.
+        :param block_store: the block store to record use of
+        :type block_store: BlockStore
+        :param block_store_usage_recorder: TODO
+        :type block_store_usage_recorder: BlockStoreUsageRecoder
+        """
+        self._block_store = block_store
+        self.recorder = block_store_usage_recorder
+
+    def get(self, locator):
+        self.recorder.record_get(locator)
+        return self._block_store.get(locator)
+
+    def put(self, locator, content):
+        self.recorder.record_put(locator, len(content))
+        return self._block_store.put(locator, content)
+
+    def delete(self, locator):
+        return_value = self._block_store.delete(locator)
+        # Better to think things are in the store rather than not
+        self.recorder.record_delete(locator)
+        return return_value
 
 
 class CacheSlot(object):
@@ -19,8 +275,8 @@ class CacheSlot(object):
         :type locator: str
         """
         self.locator = locator
-        self._content = None
         self.ready = threading.Event()
+        self._content = None
 
     @property
     def content(self):
@@ -160,134 +416,6 @@ class KeepBlockCache(object):
         """
 
 
-class InMemoryKeepBlockCache(KeepBlockCache):
-    def __init__(self, cache_max=(256 * 1024 * 1024)):
-        super(InMemoryKeepBlockCache, self).__init__(cache_max)
-        self.cache_size = cache_max
-        self._cache = []
-        self._cache_lock = threading.Lock()
-
-    def cap_cache(self):
-        '''Cap the cache size to self.cache_max'''
-        with self._cache_lock:
-            # Select all slots except those where ready.is_set() and content is
-            # None (that means there was an error reading the block).
-            self._cache = [c for c in self._cache if not (c.ready.is_set() and c.content is None)]
-            sm = sum([slot.size() for slot in self._cache])
-            while len(self._cache) > 0 and sm > self.cache_size:
-                for i in xrange(len(self._cache)-1, -1, -1):
-                    if self._cache[i].ready.is_set():
-                        del self._cache[i]
-                        break
-                sm = sum([slot.size() for slot in self._cache])
-
-    def _get(self, locator):
-        # Test if the locator is already in the cache
-        for i in xrange(0, len(self._cache)):
-            if self._cache[i].locator == locator:
-                n = self._cache[i]
-                if i != 0:
-                    # move it to the front
-                    del self._cache[i]
-                    self._cache.insert(0, n)
-                return n
-        return None
-
-    def get(self, locator):
-        with self._cache_lock:
-            return self._get(locator)
-
-    def reserve_cache(self, locator):
-        '''Reserve a cache slot for the specified locator,
-        or return the existing slot.'''
-        with self._cache_lock:
-            n = self._get(locator)
-            if n:
-                return n, False
-            else:
-                # Add a new cache slot for the locator
-                n = CacheSlot(locator)
-                self._cache.insert(0, n)
-                return n, True
-
-
-class BlockStore:
-    """
-    Simple store for blocks.
-    """
-    def get(self, locator):
-        """
-        Gets the block with the given locator from this store.
-        :param locator: the identifier of the block to get
-        :type locator: str
-        :return: the block else `None` if not found
-        """
-
-    def put(self, locator, content):
-        """
-        Puts the given content into this store for the block with the given
-        locator.
-        :param locator: the identifier of the block
-        :type locator: str
-        :param content: the block content
-        :type content: bytearray
-        """
-
-    def delete(self, locator):
-        """
-        Deletes the block with the given locator from this store. No-op if the
-        block does not exist.
-        :param locator: the block identifier
-        :type locator: str
-        """
-
-    def total_size(self):
-        """
-        Gets the total size of this cache.
-        :return: the size of the cache in bytes
-        :rtype: int
-        """
-
-
-class LMDBBlockStore(BlockStore):
-    """
-    Simple block store backed by a Lightning Memory-Mapped Database (LMDB).
-    """
-    def __init__(self, directory, map_size):
-        """
-        Constructor.
-        :param directory: the directory to use for the database (will create if
-        does not already exist else will use pre-existing). This database must
-        be used only by this store.
-        :type directory: str
-        :param map_size: maximum size that the database can grow to in bytes
-        :type map_size: int
-        """
-        self._database = lmdb.open(directory, writemap=True, map_size=map_size)
-
-    def get(self, locator):
-        with self._database.begin(buffers=True) as transaction:
-            return transaction.get(locator)
-
-    def put(self, locator, content):
-        with self._database.begin(write=True) as transaction:
-            transaction.put(locator, content)
-
-    def delete(self, locator):
-        with self._database.begin(write=True) as transaction:
-            transaction.delete(locator)
-
-    def total_size(self):
-        # FIXME: This horrific method of finding the total size of the database
-        # has to change
-        total_size = 0
-        with self._database.begin() as transaction:
-            cursor = transaction.cursor()
-            for key, value in cursor:
-                total_size += len(value)
-        return total_size
-
-
 class KeepBlockCacheWithBlockStore(KeepBlockCache):
     """
     Keep block cache backed by a block store, which can hold blocks in any way.
@@ -296,6 +424,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         """
         Constructor.
         :param block_store: store for blocks
+        :type block_store: RecordingBlockStore
         :param cache_max: maximum cache size (default: 20GB)
         """
         super(KeepBlockCacheWithBlockStore, self).__init__(cache_max)
@@ -335,7 +464,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         # Given that the cache in this implementation does not grow beyond its
         # allocated size, this operation to trim the cache back down to size
         # should be a noop.
-        assert self._block_store.total_size() <= self.cache_max
+        assert self._block_store.recorder.get_size() <= self.cache_max
 
     def create_cache_slot(self, locator, content=None):
         """
@@ -438,36 +567,25 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
                              "size of the cache")
 
         with self._space_increase_lock:
-            spare_capacity = self._get_space_capacity()
-            if space > spare_capacity:
-                reserve = space - spare_capacity
-                self._free_space_in_cache(reserve)
-                self._reserved_space += reserve
+            write_wait = threading.Semaphore(0)
+            while self._get_spare_capacity() < space:
+                if len(self._temp_fifo) > 0:
+                    locator = self._temp_fifo.pop(0)
+                    self._block_store.delete(locator)
+                else:
+                    # Space has been allocated for content that is not written
+                    # yet
+                    with self._writing_lock:
+                        for locator in self._writing:
+                            if write_wait not in self._writing_complete_listeners[locator]:
+                                self._writing_complete_listeners.append(write_wait)
+                    # Wait for something to be written to cache so that it
+                    # can be deleted and the space can be reclaimed
+                    write_wait.acquire()
 
-    def _free_space_in_cache(self, space):
-        """
-        Frees the given amount of space in the cache by deleting entries.
+            self._reserved_space += space
 
-        This method can only guarantee that the required space was free during
-        execution: it does not however reserve the space.
-        :param space: the amount of space to free (in bytes)
-        """
-        write_wait = threading.Semaphore(0)
-        while space > self._get_space_capacity():
-            if len(self._temp_fifo) > 0:
-                locator = self._temp_fifo.pop(0)
-                self._block_store.delete(locator)
-            else:
-                # Space has been allocated for content that is not written yet
-                with self._writing_lock:
-                    for locator in self._writing:
-                        if write_wait not in self._writing_complete_listeners[locator]:
-                            self._writing_complete_listeners.append(write_wait)
-                # Wait for something to be written to cache so that it can
-                # be deleted and the space can be reclaimed
-                write_wait.acquire()
-
-    def _get_space_capacity(self):
+    def _get_spare_capacity(self):
         """
         Gets the space capacity in the cache, defined as the maximum space minus
         the size of the block store, minus the reserved amount.
@@ -478,5 +596,56 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         :return: the space capacity in bytes
         :rtype: int
         """
-        return self.cache_max - (self._block_store.total_size()
+        return self.cache_max - (self._block_store.recorder.get_size()
                                  + self._reserved_space)
+
+
+class InMemoryKeepBlockCache(KeepBlockCache):
+    def __init__(self, cache_max=(256 * 1024 * 1024)):
+        super(InMemoryKeepBlockCache, self).__init__(cache_max)
+        self.cache_size = cache_max
+        self._cache = []
+        self._cache_lock = threading.Lock()
+
+    def cap_cache(self):
+        '''Cap the cache size to self.cache_max'''
+        with self._cache_lock:
+            # Select all slots except those where ready.is_set() and content is
+            # None (that means there was an error reading the block).
+            self._cache = [c for c in self._cache if not (c.ready.is_set() and c.content is None)]
+            sm = sum([slot.size() for slot in self._cache])
+            while len(self._cache) > 0 and sm > self.cache_size:
+                for i in xrange(len(self._cache)-1, -1, -1):
+                    if self._cache[i].ready.is_set():
+                        del self._cache[i]
+                        break
+                sm = sum([slot.size() for slot in self._cache])
+
+    def _get(self, locator):
+        # Test if the locator is already in the cache
+        for i in xrange(0, len(self._cache)):
+            if self._cache[i].locator == locator:
+                n = self._cache[i]
+                if i != 0:
+                    # move it to the front
+                    del self._cache[i]
+                    self._cache.insert(0, n)
+                return n
+        return None
+
+    def get(self, locator):
+        with self._cache_lock:
+            return self._get(locator)
+
+    def reserve_cache(self, locator):
+        '''Reserve a cache slot for the specified locator,
+        or return the existing slot.'''
+        with self._cache_lock:
+            n = self._get(locator)
+            if n:
+                return n, False
+            else:
+                # Add a new cache slot for the locator
+                n = CacheSlot(locator)
+                self._cache.insert(0, n)
+                return n, True

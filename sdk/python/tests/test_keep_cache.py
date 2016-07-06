@@ -4,11 +4,11 @@ from abc import ABCMeta, abstractmethod
 from tempfile import mkdtemp
 from threading import Lock, Thread, Semaphore
 
-import lmdb
 from mock import patch, MagicMock
 
 from arvados.keep_cache import InMemoryKeepBlockCache, \
-    KeepBlockCacheWithBlockStore, CacheSlot, LMDBBlockStore
+    KeepBlockCacheWithBlockStore, CacheSlot, LMDBBlockStore, \
+    DatabaseBlockStoreUsageRecoder, RecordingBlockStore
 
 _LOCATOR_1 = "3b83ef96387f14655fc854ddc3c6bd57"
 _LOCATOR_2 = "73f1eb20517c55bf9493b7dd6e480788"
@@ -108,11 +108,11 @@ class TestKeepBlockCacheWithLMDB(TestKeepBlockCache):
     Tests for `KeepBlockCacheWithBlockStore`.
     """
     def setUp(self):
-        self.database_directory = mkdtemp()
+        self.working_directory = mkdtemp()
         super(TestKeepBlockCacheWithLMDB, self).setUp()
 
     def tearDown(self):
-        shutil.rmtree(self.database_directory)
+        shutil.rmtree(self.working_directory)
 
     def test_set_content_to_more_than_max_size(self):
         slot, _ = self.cache.reserve_cache(_LOCATOR_1)
@@ -165,7 +165,12 @@ class TestKeepBlockCacheWithLMDB(TestKeepBlockCache):
         self.assertLessEqual(len(slot_1.content), 2)
 
     def _create_cache(self, cache_size):
-        block_store = LMDBBlockStore(self.database_directory, cache_size)
+        block_store = RecordingBlockStore(
+            LMDBBlockStore(self.working_directory, cache_size),
+            # FIXME: Path separator
+            DatabaseBlockStoreUsageRecoder(
+                "sqlite:///%s/usage.db" % self.working_directory)
+        )
         return KeepBlockCacheWithBlockStore(block_store, cache_size)
 
 
