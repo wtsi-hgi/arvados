@@ -70,8 +70,8 @@ class BlockStoreUsageRecorder:
 
     def record_put(self, locator, content_size):
         """
-        Records the writing of content of the the given size as the block with
-        the given locator
+        Records the writing of content of the given size as the block with the
+        given locator
         :param locator: the block identifier
         :type locator: str
         :param content_size: the size of the block content
