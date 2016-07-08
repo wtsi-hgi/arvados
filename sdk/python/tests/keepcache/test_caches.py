@@ -6,33 +6,17 @@ from threading import Lock, Thread, Semaphore
 
 from mock import patch, MagicMock
 
-from arvados.keep_cache import InMemoryKeepBlockCache, \
-    KeepBlockCacheWithBlockStore, CacheSlot, LMDBBlockStore, \
-    DatabaseBlockStoreUsageRecorder, RecordingBlockStore
+from arvados.keepcache.block_store import LMDBBlockStore, RecordingBlockStore
+from arvados.keepcache.block_store_recorder import \
+    DatabaseBlockStoreUsageRecorder
+from arvados.keepcache.caches import InMemoryKeepBlockCache, \
+    KeepBlockCacheWithBlockStore
+from arvados.keepcache.slots import CacheSlot
 
 _LOCATOR_1 = "3b83ef96387f14655fc854ddc3c6bd57"
 _LOCATOR_2 = "73f1eb20517c55bf9493b7dd6e480788"
 _CACHE_SIZE = 1 * 1024 * 1024
 _CONTENTS = bytearray(128)
-
-
-class TestCacheSlot(unittest.TestCase):
-    """
-    Unit tests for `CacheSlot`.
-    """
-    def setUp(self):
-        self.cache_slot = CacheSlot(_LOCATOR_1)
-
-    def test_cache_slot_get_when_set(self):
-        self.cache_slot.set(_CONTENTS)
-        self.assertEqual(_CONTENTS, self.cache_slot.get())
-
-    def test_cache_slot_size_when_not_set(self):
-        self.assertEqual(0, self.cache_slot.size())
-
-    def test_cache_slot_size_when_set(self):
-        self.cache_slot.set(_CONTENTS)
-        self.assertEqual(len(_CONTENTS), self.cache_slot.size())
 
 
 class TestKeepBlockCache(unittest.TestCase):

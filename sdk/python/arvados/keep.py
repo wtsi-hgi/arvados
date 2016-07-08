@@ -17,7 +17,7 @@ import arvados.errors
 import arvados.retry as retry
 import arvados.util
 import timer
-from arvados.keep_cache import KeepBlockCacheWithBlockStore
+from arvados.keepcache.caches import KeepBlockCacheWithBlockStore
 
 _logger = logging.getLogger('arvados.keep')
 global_client_object = None
