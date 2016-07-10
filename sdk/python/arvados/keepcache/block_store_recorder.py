@@ -45,14 +45,6 @@ class BlockStoreUsageRecorder(object):
         :type locator: str
         """
 
-    def _get_current_timestamp(self):
-        """
-        Gets the current timestamp.
-        :return: the current timestamp
-        :rtype: datetime
-        """
-        return datetime.now()
-
 
 class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
     """
@@ -60,21 +52,37 @@ class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
     """
     SQLAlchemyModel = declarative_base()
 
-    class _BlockRecord(SQLAlchemyModel, BlockRecord):
+    class _SqlAlchemyBlockRecord(SQLAlchemyModel, BlockRecord):
         __abstract__ = True
         __tablename__ = BlockRecord.__name__
         locator = Column(String, primary_key=True)
         timestamp = Column(DateTime)
 
-    class _BlockPutRecord(_BlockRecord, BlockPutRecord):
+    class _SqlAlchemyBlockPutRecord(_SqlAlchemyBlockRecord, BlockPutRecord):
         __tablename__ = BlockPutRecord.__name__
         size = Column(Integer)
 
-    class _BlockGetRecord(_BlockRecord, BlockGetRecord):
+    class _SqlAlchemyBlockGetRecord(_SqlAlchemyBlockRecord, BlockGetRecord):
         __tablename__ = BlockGetRecord.__name__
 
-    class _BlockDeleteRecord(_BlockRecord, BlockDeleteRecord):
+    class _SqlAlchemyBlockDeleteRecord(_SqlAlchemyBlockRecord, BlockDeleteRecord):
         __tablename__ = BlockDeleteRecord.__name__
+
+    @staticmethod
+    def _create_record(cls, locator):
+        """
+        TODO
+        :param cls:
+        :type cls: type
+        :param locator:
+        :type locator: str
+        :return:
+        :rtype: Record
+        """
+        record = cls()
+        record.locator = locator
+        record.timestamp = datetime.now()
+        return record
 
     def __init__(self, database_location):
         """
@@ -89,35 +97,34 @@ class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
         self._database = Session()
 
     def get_size(self):
-        pass
+        """
+        SELECT size
+        FROM BlockPutRecord Put
+        LEFT JOIN BlockDeleteRecord Delete
+        ON Put.locator == Delete.locator
+        WHERE 
+        """
+        Put = DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockPutRecord
+        Delete = DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockDeleteRecord
+        self._database.query(Put, Delete).\
+            filter(Put.locator == Delete.locator).\
+            filter(Put.timestamp > Delete.timestamp)
 
     def record_get(self, locator):
-        record = self._create_record(
-            DatabaseBlockStoreUsageRecorder._BlockGetRecord, locator)
+        record = DatabaseBlockStoreUsageRecorder._create_record(
+            DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockGetRecord, locator)
         self._store(record)
 
     def record_put(self, locator, content_size):
-        record = self._create_record(
-            DatabaseBlockStoreUsageRecorder._BlockPutRecord, locator)
+        record = DatabaseBlockStoreUsageRecorder._create_record(
+            DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockPutRecord, locator)
         record.size = content_size
         self._store(record)
 
     def record_delete(self, locator):
-        record = self._create_record(
-            DatabaseBlockStoreUsageRecorder._BlockDeleteRecord, locator)
+        record = DatabaseBlockStoreUsageRecorder._create_record(
+            DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockDeleteRecord, locator)
         self._store(record)
-
-    def _create_record(self, cls, locator):
-        """
-        TODO
-        :param cls:
-        :param locator:
-        :return:
-        """
-        record = cls()
-        record.locator = locator
-        record.timestamp = self._get_current_timestamp()
-        return record
 
     def _store(self, record):
         """
