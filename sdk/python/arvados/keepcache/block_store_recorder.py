@@ -1,12 +1,59 @@
-from abc import ABCMeta
+from abc import ABCMeta, abstractmethod, abstractproperty
 from datetime import datetime
 
 from sqlalchemy import Column, String, Integer, create_engine, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.sql import func
+from sqlalchemy.sql.elements import or_
 
-from arvados.keepcache.models import BlockRecord, BlockPutRecord, \
-    BlockGetRecord, BlockDeleteRecord
+
+class BlockRecord(object):
+    """
+    Timestamped record of an interaction involving a block that has a locator.
+    """
+    @abstractproperty
+    def locator(self):
+        """
+        Gets the locator of the block to which this record refers.
+        :return: the block record
+        :rtype: str
+        """
+
+    @abstractproperty
+    def timestamp(self):
+        """
+        Gets the timestamp of this record.
+        :return: the timestamp
+        :rtype: datetime
+        """
+
+
+class BlockPutRecord(BlockRecord):
+    """
+    Timestamped record of a block of a certain size being put into a cache
+    (implies a cache miss).
+    """
+    @abstractproperty
+    def size(self):
+        """
+        Gets the size of the block that was put.
+        :return: the size in bytes
+        :rtype: int
+        """
+
+
+class BlockGetRecord(BlockRecord):
+    """
+    Timestamped record of a block being accessed from a cache (implies a cache
+    hit).
+    """
+
+
+class BlockDeleteRecord(BlockRecord):
+    """
+    Timestamped record of a block being delted from a cache.
+    """
 
 
 class BlockStoreUsageRecorder(object):
@@ -15,6 +62,7 @@ class BlockStoreUsageRecorder(object):
     """
     __metaclass__ = ABCMeta
 
+    @abstractmethod
     def get_size(self):
         """
         Gets the current (known) size of the block store.
@@ -22,12 +70,22 @@ class BlockStoreUsageRecorder(object):
         :rtype: int
         """
 
+    @abstractmethod
+    def get_all_records(self):
+        """
+        Gets all of the recorded events.
+        :return: records of the events
+        :rtype: Set[Record]
+        """
+
+    @abstractmethod
     def record_get(self, locator):
         """
         Records an access to the block in the store with the given locator.
         :param locator: the block identifier
         """
 
+    @abstractmethod
     def record_put(self, locator, content_size):
         """
         Records the writing of content of the given size as the block with the
@@ -38,6 +96,7 @@ class BlockStoreUsageRecorder(object):
         :type content_size: int
         """
 
+    @abstractmethod
     def record_delete(self, locator):
         """
         Records the deletion of the block with the given locator.
@@ -55,7 +114,8 @@ class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
     class _SqlAlchemyBlockRecord(SQLAlchemyModel, BlockRecord):
         __abstract__ = True
         __tablename__ = BlockRecord.__name__
-        locator = Column(String, primary_key=True)
+        id = Column(Integer, primary_key=True)
+        locator = Column(String)
         timestamp = Column(DateTime)
 
     class _SqlAlchemyBlockPutRecord(_SqlAlchemyBlockRecord, BlockPutRecord):
@@ -71,12 +131,13 @@ class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
     @staticmethod
     def _create_record(cls, locator):
         """
-        TODO
-        :param cls:
+        Creates a record of the given class type with the given locator and a
+        timestamp of now.
+        :param cls: the type of record (must be a subtype of `Record`)
         :type cls: type
-        :param locator:
+        :param locator: the record's locator
         :type locator: str
-        :return:
+        :return: the created record
         :rtype: Record
         """
         record = cls()
@@ -90,25 +151,43 @@ class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
         :param database_location: the location of the database
         :type database_location: str
         """
-        engine = create_engine(database_location)
+        self._engine = create_engine(database_location)
         DatabaseBlockStoreUsageRecorder.SQLAlchemyModel.metadata.create_all(
-            bind=engine)
-        Session = sessionmaker(bind=engine)
-        self._database = Session()
+            bind=self._engine)
 
     def get_size(self):
-        """
-        SELECT size
-        FROM BlockPutRecord Put
-        LEFT JOIN BlockDeleteRecord Delete
-        ON Put.locator == Delete.locator
-        WHERE 
-        """
         Put = DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockPutRecord
         Delete = DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockDeleteRecord
-        self._database.query(Put, Delete).\
-            filter(Put.locator == Delete.locator).\
-            filter(Put.timestamp > Delete.timestamp)
+        session = self._create_session()
+
+        subquery = session.query(Put, func.max(Delete.timestamp).label("latest_delete")).\
+            join(Delete, Put.locator == Delete.locator).\
+            group_by(Put.locator).\
+            subquery()
+
+        results = session.query(Put).\
+            outerjoin(subquery, subquery.c.locator == Put.locator). \
+            filter(or_(
+                subquery.c.latest_delete == None,
+                Put.timestamp > subquery.c.latest_delete
+            )).\
+            all()   # type: Put
+        session.close()
+
+        return sum([result.size for result in results])
+
+    def get_all_records(self):
+        session = self._create_session()
+        record_types = [
+            DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockGetRecord,
+            DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockPutRecord,
+            DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockDeleteRecord
+        ]
+        all_records = set()     # type: Set[Record]
+        for record_type in record_types:
+            records = session.query(record_type).all()
+            all_records = all_records.union(records)
+        return all_records
 
     def record_get(self, locator):
         record = DatabaseBlockStoreUsageRecorder._create_record(
@@ -132,5 +211,11 @@ class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
         :param record: the record to store
         :type record: Record
         """
-        self._database.add(record)
-        self._database.commit()
+        session = self._create_session()
+        session.add(record)
+        session.commit()
+        session.close()
+
+    def _create_session(self):
+        Session = sessionmaker(bind=self._engine)
+        return Session()
