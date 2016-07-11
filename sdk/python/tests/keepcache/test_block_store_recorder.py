@@ -80,7 +80,3 @@ class TestDatabaseBlockStoreUsageRecorder(TestBlockStoreUsageRecorder):
 
 # Work around to stop unittest from trying to run the abstract base class
 del TestBlockStoreUsageRecorder
-
-
-if __name__ == "__main__":
-    unittest.main()

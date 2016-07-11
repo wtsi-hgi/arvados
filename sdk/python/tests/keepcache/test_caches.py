@@ -70,6 +70,17 @@ class TestKeepBlockCache(unittest.TestCase):
         # Assert that the `cap_cache` operation has not deleted the slot
         self.assertEqual(slot, self.cache.get(slot.locator))
 
+    def test_put_into_cache_when_full(self):
+        content = bytearray(_CACHE_SIZE)
+        block_writes = 10
+        assert len(content) * block_writes > _CACHE_SIZE
+        for i in range(block_writes):
+            locator = "block_%s" % i
+            slot, _ = self.cache.reserve_cache(locator)
+            slot.set(content)
+        # We can't reason at all about what might be left in the cache as that
+        # depends on the caching policy used
+
 
 class TestInMemoryKeepBlockCache(TestKeepBlockCache):
     """
@@ -150,8 +161,11 @@ class TestKeepBlockCacheWithLMDB(TestKeepBlockCache):
 
     def _create_cache(self, cache_size):
         block_store = RecordingBlockStore(
-            LMDBBlockStore(self.working_directory, cache_size),
-            # FIXME: Path separator
+            # FIXME: a lmdb database of size X bytes cannot hold X bytes of
+            # data: a certain amount of the size is not usable. However, it is
+            # unclear how much is usable! Getting around this issue for now by
+            # making the database slightly larger than the (known) cache size.
+            LMDBBlockStore(self.working_directory, cache_size * 1.1),
             DatabaseBlockStoreUsageRecorder(
                 "sqlite:///%s/usage.db" % self.working_directory)
         )

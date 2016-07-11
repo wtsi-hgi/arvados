@@ -3,6 +3,7 @@ from abc import ABCMeta, abstractmethod
 from collections import defaultdict
 from weakref import WeakValueDictionary
 
+from arvados.keepcache.replacement_policies import FIFOCacheReplacementPolicy
 from arvados.keepcache.slots import CacheSlot, GetterSetterCacheSlot
 
 
@@ -46,6 +47,9 @@ class KeepBlockCache(object):
         """
         Reserves a cache slot for the given locator or returns the existing slot
         associated with the locator.
+
+        Despite the name, this method does not reserve actual memory in the
+        cache.
         :param locator: the identifier of the entry in this cache
         :type locator: str
         :return: a tuple containing the reserved cache slot as the first element
@@ -122,15 +126,19 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
     """
     Keep block cache backed by a block store, which can hold blocks in any way.
     """
-    def __init__(self, block_store, cache_max=20 * 1024 * 1024 * 1024):
+    def __init__(self, block_store, cache_max=20 * 1024 * 1024 * 1024,
+                 cache_replacement_policy=FIFOCacheReplacementPolicy()):
         """
         Constructor.
         :param block_store: store for blocks
-        :type block_store: arvados.keepcache.block_store.RecordingBlockStore
+        :type block_store: BlockStore
+        :param cache_replacement_policy: TODO
+        :type cache_replacement_policy: CacheReplacementPolicy
         :param cache_max: maximum cache size (default: 20GB)
         """
         super(KeepBlockCacheWithBlockStore, self).__init__(cache_max)
         self._block_store = block_store
+        self._cache_replacement_policy = cache_replacement_policy
         self._referenced_cache_slots = WeakValueDictionary()
         self._referenced_cache_slots_lock = threading.Lock()
         self._writing = set()
@@ -138,7 +146,6 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         self._writing_complete_listeners = defaultdict(set)
         self._reserved_space = 0
         self._space_increase_lock = threading.Lock()
-        self._temp_fifo = []
 
     def get(self, locator):
         # Return pre-existing model of slot if referenced elsewhere. This is
@@ -247,7 +254,6 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         self._reserve_space_in_cache(len(content))
         self._block_store.put(locator, content)
         self._reserved_space -= len(content)
-        self._temp_fifo.append(locator)
 
         with self._writing_lock:
             self._writing.remove(locator)
@@ -271,8 +277,12 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         with self._space_increase_lock:
             write_wait = threading.Semaphore(0)
             while self._get_spare_capacity() < space:
-                if len(self._temp_fifo) > 0:
-                    locator = self._temp_fifo.pop(0)
+                # FIXME
+                active_block_puts = self._block_store.recorder.get_active()
+                if len(active_block_puts) > 0:
+                    locator = self._cache_replacement_policy.next_to_delete(
+                        active_block_puts)
+                    assert locator in [put.locator for put in active_block_puts]
                     self._block_store.delete(locator)
                 else:
                     # Space has been allocated for content that is not written

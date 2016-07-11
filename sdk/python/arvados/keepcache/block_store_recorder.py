@@ -71,6 +71,14 @@ class BlockStoreUsageRecorder(object):
         """
 
     @abstractmethod
+    def get_active(self):
+        """
+        TODO
+        :return:
+        :rtype: BlockPutRecord
+        """
+
+    @abstractmethod
     def get_all_records(self):
         """
         Gets all of the recorded events.
@@ -156,25 +164,32 @@ class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
             bind=self._engine)
 
     def get_size(self):
+        return sum([put.size for put in self.get_active()])
+
+    def get_active(self):
+        """
+        TODO
+        :return:
+        """
         Put = DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockPutRecord
         Delete = DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockDeleteRecord
         session = self._create_session()
 
-        subquery = session.query(Put, func.max(Delete.timestamp).label("latest_delete")).\
-            join(Delete, Put.locator == Delete.locator).\
-            group_by(Put.locator).\
+        subquery = session.query(Put, func.max(Delete.timestamp).label(
+            "latest_delete")). \
+            join(Delete, Put.locator == Delete.locator). \
+            group_by(Put.locator). \
             subquery()
 
-        results = session.query(Put).\
+        results = session.query(Put). \
             outerjoin(subquery, subquery.c.locator == Put.locator). \
             filter(or_(
-                subquery.c.latest_delete == None,
-                Put.timestamp > subquery.c.latest_delete
-            )).\
-            all()   # type: Put
+            subquery.c.latest_delete == None,
+            Put.timestamp > subquery.c.latest_delete
+        )). \
+            all()  # type: Put
         session.close()
-
-        return sum([result.size for result in results])
+        return results
 
     def get_all_records(self):
         session = self._create_session()
@@ -205,6 +220,10 @@ class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
             DatabaseBlockStoreUsageRecorder._SqlAlchemyBlockDeleteRecord, locator)
         self._store(record)
 
+    def _create_session(self):
+        Session = sessionmaker(bind=self._engine)
+        return Session()
+
     def _store(self, record):
         """
         Stores the given record.
@@ -215,7 +234,3 @@ class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
         session.add(record)
         session.commit()
         session.close()
-
-    def _create_session(self):
-        Session = sessionmaker(bind=self._engine)
-        return Session()
