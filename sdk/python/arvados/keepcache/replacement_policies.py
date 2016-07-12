@@ -23,7 +23,7 @@ class CacheReplacementPolicy(object):
 
 class FIFOCacheReplacementPolicy(CacheReplacementPolicy):
     """
-    TODO
+    Replacement policy where the first block in is the first block out.
     """
     def next_to_delete(self, block_put_records):
         if len(block_put_records) == 0:

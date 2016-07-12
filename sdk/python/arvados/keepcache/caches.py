@@ -228,7 +228,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         :param content: the content
         :type content: bytearray
         """
-        # No do ... while loop in Python
+        # Note: there is no do ... while loop in Python
         writing_locator_content = True
         while writing_locator_content:
             if self._get_content(locator) == content:
@@ -251,9 +251,10 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
                 # Given that the locator is a hash of the content is highly
                 # likely at this point that the content has already been written
 
-        self._reserve_space_in_cache(len(content))
+        required_space = self._block_store.calculate_stored_size(content)
+        self._reserve_space_in_cache(required_space)
         self._block_store.put(locator, content)
-        self._reserved_space -= len(content)
+        self._reserved_space -= required_space
 
         with self._writing_lock:
             self._writing.remove(locator)
@@ -272,18 +273,19 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         """
         if space > self.cache_max:
             raise ValueError("Cannot reserve more space in the cache than the "
-                             "size of the cache")
+                             "space available in the cache")
 
         with self._space_increase_lock:
             write_wait = threading.Semaphore(0)
             while self._get_spare_capacity() < space:
-                # FIXME
+
                 active_block_puts = self._block_store.recorder.get_active()
                 if len(active_block_puts) > 0:
                     locator = self._cache_replacement_policy.next_to_delete(
                         active_block_puts)
                     assert locator in [put.locator for put in active_block_puts]
-                    self._block_store.delete(locator)
+                    deleted = self._block_store.delete(locator)
+                    assert deleted
                 else:
                     # Space has been allocated for content that is not written
                     # yet
@@ -310,4 +312,3 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         """
         return self.cache_max - (self._block_store.recorder.get_size()
                                  + self._reserved_space)
-

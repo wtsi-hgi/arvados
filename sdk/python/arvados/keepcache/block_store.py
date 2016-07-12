@@ -1,6 +1,7 @@
-from abc import ABCMeta
+from abc import ABCMeta, abstractmethod
 
 import lmdb
+from math import ceil
 
 
 class BlockStore(object):
@@ -9,6 +10,7 @@ class BlockStore(object):
     """
     __metaclass__ = ABCMeta
 
+    @abstractmethod
     def get(self, locator):
         """
         Gets the block with the given locator from this store.
@@ -17,6 +19,7 @@ class BlockStore(object):
         :return: the block else `None` if not found
         """
 
+    @abstractmethod
     def put(self, locator, content):
         """
         Puts the given content into this store for the block with the given
@@ -27,12 +30,26 @@ class BlockStore(object):
         :type content: bytearray
         """
 
+    @abstractmethod
     def delete(self, locator):
         """
         Deletes the block with the given locator from this store. No-op if the
         block does not exist.
         :param locator: the block identifier
         :type locator: str
+        :return: whether an entry was deleted
+        :rtype: bool
+        """
+
+    @abstractmethod
+    def calculate_stored_size(self, content):
+        """
+        Calculates how much size the given content will take up when stored
+        inside this block store.
+        :param content: the content
+        :type content: bytearray
+        :return: size of content when stored in bytes
+        :rtype: int
         """
 
 
@@ -62,7 +79,15 @@ class LMDBBlockStore(BlockStore):
 
     def delete(self, locator):
         with self._database.begin(write=True) as transaction:
-            transaction.delete(locator)
+            return transaction.delete(locator)
+
+    def calculate_stored_size(self, content):
+        size = len(content)
+        page_size = self._database.stat()["psize"]
+        # Float casts are required - in outdated Python 2.7, / is "integer
+        # division" if the inputs are int/long
+        # FIXME: No idea if this is correct?
+        return int(ceil(float(size) / float(page_size)) * page_size)
 
 
 class RecordingBlockStore(BlockStore):
@@ -93,3 +118,6 @@ class RecordingBlockStore(BlockStore):
         # Better to think things are in the store rather than not
         self.recorder.record_delete(locator)
         return return_value
+
+    def calculate_stored_size(self, content):
+        return self._block_store.calculate_stored_size(content)

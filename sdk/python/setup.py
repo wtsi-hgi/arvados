@@ -52,7 +52,7 @@ setup(name='arvados-python-client',
           'pycurl >=7.19.5.1, <7.21.5',
           'python-gflags<3.0',
           'ws4py',
-          'lmdb==0.89',
+          'lmdb==0.90',
           'sqlalchemy==1.0.14,'
       ],
       test_suite='tests',

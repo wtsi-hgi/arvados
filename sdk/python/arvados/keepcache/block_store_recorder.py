@@ -73,8 +73,9 @@ class BlockStoreUsageRecorder(object):
     @abstractmethod
     def get_active(self):
         """
-        TODO
-        :return:
+        Gets the put records of the blocks that are currently in the block store
+        whose usage is being recorded.
+        :return: active blocks
         :rtype: BlockPutRecord
         """
 
