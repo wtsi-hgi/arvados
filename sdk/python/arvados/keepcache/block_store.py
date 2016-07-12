@@ -106,12 +106,14 @@ class LMDBBlockStore(BlockStore):
             return transaction.delete(locator)
 
     def calculate_stored_size(self, content):
+        # TODO: if max_key_size + size <= 2040, LMDB will store multiple entries
+        # per page. This implementation currently assumes one entry per page at
+        # the expense of a small amount of wasted space. Given that most Keep
+        # blocks will be large, the loss will be relatively small
         size = len(content)
         page_size = self._database.stat()["psize"]
-        # Float casts are required - in outdated Python 2.7, / is "integer
-        # division" if the inputs are int/long
-        # FIXME: No idea if this is correct?
-        return int(ceil(float(size) / float(page_size)) * page_size)
+        max_key_size = self._database.max_key_size()
+        return int(ceil(float(16 + max_key_size + size) / float(page_size)) * page_size)
 
 
 class RecordingBlockStore(BlockStore):
