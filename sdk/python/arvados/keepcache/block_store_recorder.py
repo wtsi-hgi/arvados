@@ -1,4 +1,6 @@
+import bisect
 from abc import ABCMeta, abstractmethod, abstractproperty
+from collections import defaultdict
 from datetime import datetime
 
 from sqlalchemy import Column, String, Integer, create_engine, DateTime
@@ -58,17 +60,9 @@ class BlockDeleteRecord(BlockRecord):
 
 class BlockStoreUsageRecorder(object):
     """
-    Recorder for the usage of a block store.
+    Bookkeeper for the usage of a block store.
     """
     __metaclass__ = ABCMeta
-
-    @abstractmethod
-    def get_size(self):
-        """
-        Gets the current (known) size of the block store.
-        :return: the current size of the block store in bytes
-        :rtype: int
-        """
 
     @abstractmethod
     def get_active(self):
@@ -76,7 +70,7 @@ class BlockStoreUsageRecorder(object):
         Gets the put records of the blocks that are currently in the block store
         whose usage is being recorded.
         :return: active blocks
-        :rtype: BlockPutRecord
+        :rtype: Set[BlockPutRecord]
         """
 
     @abstractmethod
@@ -112,6 +106,89 @@ class BlockStoreUsageRecorder(object):
         :param locator: the block identifier
         :type locator: str
         """
+
+    def get_size(self):
+        """
+        Gets the current (known) size of the block store.
+        :return: the current size of the block store in bytes
+        :rtype: int
+        """
+        return sum([put.size for put in self.get_active()])
+
+
+class InMemoryBlockStoreUsageRecorder(BlockStoreUsageRecorder):
+    """
+    In memory bookkeeper for usage of a block store.
+    """
+    class InMemoryBlockRecord(BlockRecord):
+        """In memory block record."""
+        __metaclass__ = ABCMeta
+
+        def __init__(self, locator, timestamp):
+            self._locator = locator
+            self._timestamp = timestamp
+
+        @property
+        def locator(self):
+            return self._locator
+
+        @property
+        def timestamp(self):
+            return self._timestamp
+
+    class InMemoryBlockPutRecord(InMemoryBlockRecord, BlockPutRecord):
+        """In memory block put record."""
+        def __init__(self, locator, timestamp, size):
+            super(InMemoryBlockStoreUsageRecorder.InMemoryBlockPutRecord, self).__init__(
+                locator, timestamp)
+            self._size = size
+
+        @property
+        def size(self):
+            return self._size
+
+    class InMemoryBlockGetRecord(InMemoryBlockRecord, BlockGetRecord):
+        """In memory block get record."""
+
+    class InMemoryBlockDeleteRecord(InMemoryBlockRecord, BlockDeleteRecord):
+        """In memory block delete record."""
+
+    def __init__(self):
+        self._records = defaultdict(set)  # type: Dict[type, Set[Record]]
+
+    def get_active(self):
+        PutRecord = InMemoryBlockStoreUsageRecorder.InMemoryBlockPutRecord
+        puts = self._records[PutRecord]
+        deletes = self._records[InMemoryBlockStoreUsageRecorder.InMemoryBlockDeleteRecord]
+        locator_records = dict()  # type: Dict[str, Record]
+
+        for record in puts | deletes:
+            if record.locator not in locator_records:
+                locator_records[record.locator] = record
+            else:
+                if record.timestamp > locator_records[record.locator].timestamp:
+                    locator_records[record.locator] = record
+
+        return [record for record in locator_records.values() if isinstance(record, PutRecord)]
+
+    def get_all_records(self):
+        records = set()     # type: Set[Record]
+        for record_type in self._records.keys():
+            records = records.union(self._records[record_type])
+        return records
+
+    def record_get(self, locator):
+        GetRecord = InMemoryBlockStoreUsageRecorder.InMemoryBlockGetRecord
+        record = GetRecord(locator, datetime.now())
+        self._records[GetRecord].add(GetRecord(locator, datetime.now()))
+
+    def record_put(self, locator, content_size):
+        PutRecord = InMemoryBlockStoreUsageRecorder.InMemoryBlockPutRecord
+        self._records[PutRecord].add(PutRecord(locator, datetime.now(), content_size))
+
+    def record_delete(self, locator):
+        DeleteRecord = InMemoryBlockStoreUsageRecorder.InMemoryBlockDeleteRecord
+        self._records[DeleteRecord].add(DeleteRecord(locator, datetime.now()))
 
 
 class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
@@ -164,9 +241,6 @@ class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
         DatabaseBlockStoreUsageRecorder.SQLAlchemyModel.metadata.create_all(
             bind=self._engine)
 
-    def get_size(self):
-        return sum([put.size for put in self.get_active()])
-
     def get_active(self):
         """
         TODO
@@ -187,10 +261,9 @@ class DatabaseBlockStoreUsageRecorder(BlockStoreUsageRecorder):
             filter(or_(
             subquery.c.latest_delete == None,
             Put.timestamp > subquery.c.latest_delete
-        )). \
-            all()  # type: Put
+        )).all()
         session.close()
-        return results
+        return set(results)
 
     def get_all_records(self):
         session = self._create_session()

@@ -17,6 +17,7 @@ class BlockStore(object):
         :param locator: the identifier of the block to get
         :type locator: str
         :return: the block else `None` if not found
+        :rtype: Optional[bytearray]
         """
 
     @abstractmethod
@@ -51,6 +52,29 @@ class BlockStore(object):
         :return: size of content when stored in bytes
         :rtype: int
         """
+
+
+class InMemoryBlockStore(BlockStore):
+    """
+    Basic in-memory block store.
+    """
+    def __init__(self):
+        self._data = dict()     # type: Dict[str, bytearray]
+
+    def get(self, locator):
+        return self._data.get(locator, None)
+
+    def put(self, locator, content):
+        self._data[locator] = content
+
+    def delete(self, locator):
+        if locator not in self._data:
+            return False
+        del self._data[locator]
+        return True
+
+    def calculate_stored_size(self, content):
+        return len(content)
 
 
 class LMDBBlockStore(BlockStore):

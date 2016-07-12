@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from abc import ABCMeta, abstractmethod
 
-from arvados.keepcache.block_store_recorder import DatabaseBlockStoreUsageRecorder
-
-_LOCATORS = ["123", "456", "789"]
+from arvados.keepcache.block_store_recorder import DatabaseBlockStoreUsageRecorder, \
+    InMemoryBlockStoreUsageRecorder
+from tests.keepcache._common import LOCATORS
 
 
 class TestBlockStoreUsageRecorder(unittest.TestCase):
@@ -15,7 +15,7 @@ class TestBlockStoreUsageRecorder(unittest.TestCase):
     __metaclass__ = ABCMeta
 
     @abstractmethod
-    def create_recorder(self):
+    def _create_recorder(self):
         """
         Creates a record that is to be tested.
         :return: the recorder
@@ -23,7 +23,7 @@ class TestBlockStoreUsageRecorder(unittest.TestCase):
         """
 
     def setUp(self):
-        self.recorder = self.create_recorder()
+        self.recorder = self._create_recorder()
 
     def test_get_size(self):
         self.recorder.record_put("1", 1)
@@ -39,13 +39,13 @@ class TestBlockStoreUsageRecorder(unittest.TestCase):
         self.assertEqual(6, self.recorder.get_size())
 
     def test_record_get(self):
-        for locator in _LOCATORS:
+        for locator in LOCATORS:
             self.recorder.record_get(locator)
         records = self.recorder.get_all_records()
-        self.assertEqual(set(_LOCATORS), {record.locator for record in records})
+        self.assertEqual(set(LOCATORS), {record.locator for record in records})
 
     def test_record_put(self):
-        locator_size_pairs = [(_LOCATORS[i], i) for i in range(len(_LOCATORS))]
+        locator_size_pairs = [(LOCATORS[i], i) for i in range(len(LOCATORS))]
         for locator, size in iter(locator_size_pairs):
             self.recorder.record_put(locator, size)
         records = self.recorder.get_all_records()
@@ -53,10 +53,18 @@ class TestBlockStoreUsageRecorder(unittest.TestCase):
                          {(record.locator, record.size) for record in records})
 
     def test_record_delete(self):
-        for locator in _LOCATORS:
+        for locator in LOCATORS:
             self.recorder.record_delete(locator)
         records = self.recorder.get_all_records()
-        self.assertEqual(set(_LOCATORS), {record.locator for record in records})
+        self.assertEqual(set(LOCATORS), {record.locator for record in records})
+
+
+class TestInMemoryBlockStoreUsageRecorder(TestBlockStoreUsageRecorder):
+    """
+    Tests for `InMemoryBlockStoreUsageRecorder`.
+    """
+    def _create_recorder(self):
+        return InMemoryBlockStoreUsageRecorder()
 
 
 class TestDatabaseBlockStoreUsageRecorder(TestBlockStoreUsageRecorder):
@@ -71,7 +79,7 @@ class TestDatabaseBlockStoreUsageRecorder(TestBlockStoreUsageRecorder):
         for location in self._database_locations:
             os.remove(location)
 
-    def create_recorder(self):
+    def _create_recorder(self):
         _, database_location = tempfile.mkstemp()
         self._database_locations.append(database_location)
         return DatabaseBlockStoreUsageRecorder(

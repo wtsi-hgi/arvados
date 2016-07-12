@@ -10,6 +10,8 @@ from arvados.keepcache.slots import CacheSlot, GetterSetterCacheSlot
 class KeepBlockCache(object):
     """
     Base class for Keep block caches.
+
+    This interface was extracted extracted from
     """
     __metaclass__ = ABCMeta
 
@@ -278,13 +280,12 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         with self._space_increase_lock:
             write_wait = threading.Semaphore(0)
             while self._get_spare_capacity() < space:
+                delete_locator = self._cache_replacement_policy.next_to_delete(
+                    self._block_store.recorder)
 
-                active_block_puts = self._block_store.recorder.get_active()
-                if len(active_block_puts) > 0:
-                    locator = self._cache_replacement_policy.next_to_delete(
-                        active_block_puts)
-                    assert locator in [put.locator for put in active_block_puts]
-                    deleted = self._block_store.delete(locator)
+                if delete_locator is not None:
+                    assert delete_locator in [put.locator for put in self._block_store.recorder.get_active()]
+                    deleted = self._block_store.delete(delete_locator)
                     assert deleted
                 else:
                     # Space has been allocated for content that is not written
