@@ -99,6 +99,11 @@ class TestKeepBlockCacheWithBlockStore(TestKeepBlockCache):
     """
     Tests for `KeepBlockCacheWithBlockStore`.
     """
+    def test_get_when_set_in_block_store_in_previous_cache(self):
+        self.cache.block_store.put(LOCATOR_1, CONTENTS)
+        self.assertEqual(CONTENTS, self.cache.get(LOCATOR_1).content)
+
+
     def test_set_content_to_more_than_max_size(self):
         slot, _ = self.cache.reserve_cache(LOCATOR_1)
         self.assertRaises(ValueError, slot.set, bytearray(CACHE_SIZE + 1))

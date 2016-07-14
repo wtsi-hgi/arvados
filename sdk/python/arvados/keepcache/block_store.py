@@ -92,6 +92,7 @@ class LMDBBlockStore(BlockStore):
         :type map_size: int
         """
         self._database = lmdb.open(directory, writemap=True, map_size=map_size)
+        self._map_size = map_size
 
     def get(self, locator):
         with self._database.begin(buffers=True) as transaction:
@@ -114,6 +115,18 @@ class LMDBBlockStore(BlockStore):
         page_size = self._database.stat()["psize"]
         max_key_size = self._database.max_key_size()
         return int(ceil(float(16 + max_key_size + size) / float(page_size)) * page_size)
+
+    def calculate_usuable_size(self):
+        """
+        Calculates the usable size of this block store.
+        :return: the usable size in bytes
+        """
+        page_size = self._database.stat()["psize"]
+        # Note: This is an underestimate as it assumes all content will be at
+        # least the size of a page
+        size = self._map_size - (4 * page_size + 16)
+        assert self._map_size >= page_size >= 0
+        return size
 
 
 class RecordingBlockStore(BlockStore):

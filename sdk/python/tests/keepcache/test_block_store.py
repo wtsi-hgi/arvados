@@ -38,12 +38,14 @@ class TestBlockStore(unittest.TestCase):
     def _create_block_store(self):
         """
         Creates a block store that is to be tested.
-        :return: the created block store
-        :rtype: BlockStore
+        :return: a tuple where the first item is the created block store and the
+        second is the total capacity of the block store in bytes (capacity
+        should be around `CACHE_SIZE`)
+        :rtype: Tuple[BlockStore, int]
         """
 
     def setUp(self):
-        self.block_store = self._create_block_store()
+        self.block_store, self.size = self._create_block_store()
 
     def test_put_and_get(self):
         self.block_store.put(LOCATOR_1, CONTENTS)
@@ -64,8 +66,8 @@ class TestBlockStore(unittest.TestCase):
             return self.block_store.calculate_stored_size(contents)
 
         sizes = _LazyCalculatedDict(size_to_actual_size_mapper)
-        actual_size = bisect_left(sizes, CACHE_SIZE, hi=CACHE_SIZE)
-        assert CACHE_SIZE >= actual_size > 0
+        actual_size = bisect_left(sizes, self.size, hi=self.size)
+        assert self.size >= actual_size > 0
         contents = bytearray(actual_size)
         self.block_store.put(LOCATOR_1, contents)
         self.assertEqual(contents, self.block_store.get(LOCATOR_1))
@@ -100,7 +102,7 @@ class TestInMemoryBlockStore(TestBlockStore):
     Tests for `InMemoryBlockStore`.
     """
     def _create_block_store(self):
-        return InMemoryBlockStore()
+        return InMemoryBlockStore(), CACHE_SIZE
 
 
 class TestLMDBBlockStore(TestBlockStore):
@@ -118,7 +120,8 @@ class TestLMDBBlockStore(TestBlockStore):
     def _create_block_store(self):
         temp_directory = mkdtemp()
         self._temp_directories.append(temp_directory)
-        return LMDBBlockStore(temp_directory, CACHE_SIZE)
+        block_store = LMDBBlockStore(temp_directory, CACHE_SIZE)
+        return block_store, block_store.calculate_usuable_size()
 
 
 # TODO
