@@ -5,6 +5,8 @@ from abc import ABCMeta, abstractmethod
 from bisect import bisect_left
 from tempfile import mkdtemp
 
+from math import ceil
+
 from arvados.keepcache.block_store import LMDBBlockStore, InMemoryBlockStore
 from tests.keepcache._common import CONTENTS, CACHE_SIZE, LOCATOR_1
 
@@ -84,17 +86,16 @@ class TestBlockStore(unittest.TestCase):
         self.assertIsNone(self.block_store.get(LOCATOR_1))
 
     def test_delete_frees_space(self):
-        write_size = 1
-        while True:
-            contents = bytearray(write_size)
-            size_in_store = self.block_store.calculate_stored_size(contents)
-
-            if size_in_store <= CACHE_SIZE:
-                self.block_store.put(LOCATOR_1, contents)
-                self.block_store.delete(LOCATOR_1)
-                write_size *= 2
-            else:
-                break
+        proportion_capacity = 0.3
+        size = int(CACHE_SIZE * proportion_capacity)
+        assert size > 0
+        contents = bytearray(size)
+        for _ in range(int(1 / proportion_capacity) * 100):
+            assert self.block_store.get(LOCATOR_1) is None
+            self.block_store.put(LOCATOR_1, contents)
+            deleted = self.block_store.delete(LOCATOR_1)
+            assert deleted
+            self.assertIsNone(self.block_store.get(LOCATOR_1))
 
 
 class TestInMemoryBlockStore(TestBlockStore):

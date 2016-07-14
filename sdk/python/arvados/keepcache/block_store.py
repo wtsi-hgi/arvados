@@ -81,6 +81,8 @@ class LMDBBlockStore(BlockStore):
     """
     Block store backed by a Lightning Memory-Mapped Database (LMDB).
     """
+    _HEADER_SIZE = 16
+
     def __init__(self, directory, map_size):
         """
         Constructor.
@@ -95,7 +97,7 @@ class LMDBBlockStore(BlockStore):
         self._map_size = map_size
 
     def get(self, locator):
-        with self._database.begin(buffers=True) as transaction:
+        with self._database.begin() as transaction:
             return transaction.get(locator)
 
     def put(self, locator, content):
@@ -112,21 +114,30 @@ class LMDBBlockStore(BlockStore):
         # the expense of a small amount of wasted space. Given that most Keep
         # blocks will be large, the loss will be relatively small
         size = len(content)
-        page_size = self._database.stat()["psize"]
+        page_size = self._get_page_size()
         max_key_size = self._database.max_key_size()
-        return int(ceil(float(16 + max_key_size + size) / float(page_size)) * page_size)
+        return int(ceil(float(LMDBBlockStore._HEADER_SIZE + max_key_size + size) / float(page_size)) * page_size)
 
     def calculate_usuable_size(self):
         """
         Calculates the usable size of this block store.
         :return: the usable size in bytes
+        :rtype: int
         """
-        page_size = self._database.stat()["psize"]
+        page_size = self._get_page_size()
         # Note: This is an underestimate as it assumes all content will be at
         # least the size of a page
-        size = self._map_size - (4 * page_size + 16)
+        size = self._map_size - (4 * page_size + LMDBBlockStore._HEADER_SIZE)
         assert self._map_size >= page_size >= 0
         return size
+
+    def _get_page_size(self):
+        """
+        Gets the size of a page.
+        :return: the page size in bytes
+        :rtype: int
+        """
+        return self._database.stat()["psize"]
 
 
 class RecordingBlockStore(BlockStore):
