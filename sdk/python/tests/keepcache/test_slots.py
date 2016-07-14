@@ -1,3 +1,4 @@
+import threading
 import unittest
 
 from mock import MagicMock
@@ -40,7 +41,7 @@ class TestGetterSetterCacheSlot(TestCacheSlot):
         self.cache_slot = GetterSetterCacheSlot(
             LOCATOR_1, self.getter, self.setter)
 
-    def test_get_when_external(self):
+    def test_get_when_in_external(self):
         self.getter.return_value = CONTENTS
         self.assertEqual(CONTENTS, self.cache_slot.get())
 

@@ -1,11 +1,31 @@
 import shutil
 import unittest
+from UserDict import UserDict
 from abc import ABCMeta, abstractmethod
+from bisect import bisect_left
 from tempfile import mkdtemp
 
 from arvados.keepcache.block_store import LMDBBlockStore, InMemoryBlockStore
-from tests.keepcache._common import CONTENTS, CACHE_SIZE
-from tests.keepcache._common import LOCATOR_1
+from tests.keepcache._common import CONTENTS, CACHE_SIZE, LOCATOR_1
+
+
+class _LazyCalculatedDict(UserDict):
+    """
+    Dict with values that are lazily calculated using a calculator function.
+    """
+    def __init__(self, calculator, *args, **kwargs):
+        UserDict.__init__(self, *args, **kwargs)
+        self._calculator = calculator
+
+    def __getitem__(self, key):
+        if key not in self.data:
+            self.data[key] = self._calculator(key)
+        return self.data[key]
+
+    def __setitem__(self, key, value):
+        if self._calculator(key) != value:
+            raise ValueError("")
+        self.data[key] = value
 
 
 class TestBlockStore(unittest.TestCase):
@@ -39,15 +59,26 @@ class TestBlockStore(unittest.TestCase):
         self.assertEqual(CONTENTS, self.block_store.get(LOCATOR_1))
 
     def test_put_maximum_amount(self):
-        # FIXME: Max amount is determined by the `calculate_stored_size` method
-        contents = bytearray(CACHE_SIZE)
+        def size_to_actual_size_mapper(size):
+            contents = bytearray(size)
+            return self.block_store.calculate_stored_size(contents)
+
+        sizes = _LazyCalculatedDict(size_to_actual_size_mapper)
+        actual_size = bisect_left(sizes, CACHE_SIZE, hi=CACHE_SIZE)
+        assert CACHE_SIZE >= actual_size > 0
+        contents = bytearray(actual_size)
         self.block_store.put(LOCATOR_1, contents)
         self.assertEqual(contents, self.block_store.get(LOCATOR_1))
 
-    def test_delete(self):
+    def test_delete_when_not_put(self):
+        deleted = self.block_store.delete(LOCATOR_1)
+        self.assertFalse(deleted)
+
+    def test_delete_when_put(self):
         self.block_store.put(LOCATOR_1, CONTENTS)
         assert self.block_store.get(LOCATOR_1) == CONTENTS
-        self.block_store.delete(LOCATOR_1)
+        deleted = self.block_store.delete(LOCATOR_1)
+        self.assertTrue(deleted)
         self.assertIsNone(self.block_store.get(LOCATOR_1))
 
     def test_delete_frees_space(self):
