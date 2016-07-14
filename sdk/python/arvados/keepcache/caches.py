@@ -133,13 +133,15 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         """
         Constructor.
         :param block_store: store for blocks
-        :type block_store: BlockStore
+        :type block_store: RecordingBlockStore
+        :param cache_max: maximum cache size (default: 20GB)
+        :type cache_max: int
         :param cache_replacement_policy: TODO
         :type cache_replacement_policy: CacheReplacementPolicy
-        :param cache_max: maximum cache size (default: 20GB)
         """
         super(KeepBlockCacheWithBlockStore, self).__init__(cache_max)
-        self._block_store = block_store
+        # TODO: Make block store read-only
+        self.block_store = block_store
         self._cache_replacement_policy = cache_replacement_policy
         self._referenced_cache_slots = WeakValueDictionary()
         self._referenced_cache_slots_lock = threading.Lock()
@@ -158,7 +160,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         if slot is not None:
             return slot
         else:
-            content = self._block_store.get(locator)
+            content = self.block_store.get(locator)
             if content is None:
                 return None
             else:
@@ -175,7 +177,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         # Given that the cache in this implementation does not grow beyond its
         # allocated size, this operation to trim the cache back down to size
         # should be a noop.
-        assert self._block_store.recorder.get_size() <= self.cache_max
+        assert self.block_store.recorder.get_size() <= self.cache_max
 
     def create_cache_slot(self, locator, content=None):
         """
@@ -214,7 +216,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         :return: the content associated to the locator or `None` if not set
         :rtype: Optional[bytearray]
         """
-        return self._block_store.get(locator)
+        return self.block_store.get(locator)
 
     def _set_content(self, locator, content):
         """
@@ -253,9 +255,9 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
                 # Given that the locator is a hash of the content is highly
                 # likely at this point that the content has already been written
 
-        required_space = self._block_store.calculate_stored_size(content)
+        required_space = self.block_store.calculate_stored_size(content)
         self._reserve_space_in_cache(required_space)
-        self._block_store.put(locator, content)
+        self.block_store.put(locator, content)
         self._reserved_space -= required_space
 
         with self._writing_lock:
@@ -281,11 +283,11 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
             write_wait = threading.Semaphore(0)
             while self._get_spare_capacity() < space:
                 delete_locator = self._cache_replacement_policy.next_to_delete(
-                    self._block_store.recorder)
+                    self.block_store.recorder)
 
                 if delete_locator is not None:
-                    assert delete_locator in [put.locator for put in self._block_store.recorder.get_active()]
-                    deleted = self._block_store.delete(delete_locator)
+                    assert delete_locator in [put.locator for put in self.block_store.recorder.get_active()]
+                    deleted = self.block_store.delete(delete_locator)
                     assert deleted
                 else:
                     # Space has been allocated for content that is not written
@@ -311,5 +313,5 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         :return: the space capacity in bytes
         :rtype: int
         """
-        return self.cache_max - (self._block_store.recorder.get_size()
+        return self.cache_max - (self.block_store.recorder.get_size()
                                  + self._reserved_space)

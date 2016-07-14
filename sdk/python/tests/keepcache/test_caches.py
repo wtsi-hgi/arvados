@@ -1,16 +1,19 @@
-import shutil
 import unittest
 from abc import ABCMeta, abstractmethod
-from tempfile import mkdtemp
 
-from arvados.keepcache.block_store import LMDBBlockStore, RecordingBlockStore, \
+from multiprocessing import Lock, Semaphore
+from threading import Thread
+
+from mock import MagicMock
+
+from arvados.keepcache.block_store import RecordingBlockStore, \
     InMemoryBlockStore
 from arvados.keepcache.block_store_recorder import \
-    DatabaseBlockStoreUsageRecorder, InMemoryBlockStoreUsageRecorder
+    InMemoryBlockStoreUsageRecorder
 from arvados.keepcache.caches import InMemoryKeepBlockCache, \
     KeepBlockCacheWithBlockStore
 from arvados.keepcache.slots import CacheSlot
-from tests.keepcache._common import LOCATOR_1, CACHE_SIZE, CONTENTS
+from tests.keepcache._common import LOCATOR_1, CACHE_SIZE, CONTENTS, LOCATOR_2
 
 
 class TestKeepBlockCache(unittest.TestCase):
@@ -105,39 +108,39 @@ class TestKeepBlockCacheWithBlockStore(TestKeepBlockCache):
         slot_2 = self.cache.create_cache_slot(LOCATOR_1, bytearray(0))
         self.assertEqual(id(slot_1), id(slot_2))
 
-    # FIXME: Change for use with simplier block store!
-    # @patch("lmdb.open")
-    # def test_concurrent_set_for_same_locator(self, lmdb_open):
-    #     puts = []
-    #     puts_lock = Lock()
-    #     continue_lock = Lock()
-    #     continue_lock.acquire()
-    #     continued = Semaphore(0)
-    #
-    #     def pause_put(*args, **kwargs):
-    #         # The joys of using a version of Python that was outmoded in 2008...
-    #         # http://stackoverflow.com/questions/3190706/nonlocal-keyword-in-python-2-x
-    #         with puts_lock:
-    #             puts.append(True)
-    #             pause = len(puts) == 1
-    #         if pause:
-    #             continue_lock.acquire()
-    #         continued.release()
-    #
-    #     lmdb_open().begin().__enter__().put = MagicMock(side_effect=pause_put)
-    #
-    #     cache = self._create_cache(_CACHE_SIZE)
-    #     slot_1, _ = cache.reserve_cache(_LOCATOR_1)
-    #     slot_2, _ = cache.reserve_cache(_LOCATOR_2)
-    #     Thread(target=slot_1.set, args=(bytearray(1),)).start()
-    #     Thread(target=slot_1.set, args=(bytearray(2),)).start()
-    #     Thread(target=slot_2.set, args=(bytearray(3),)).start()
-    #     continue_lock.release()
-    #
-    #     while len(puts) != 3:
-    #         continued.acquire()
-    #     # No guarantees on value of slot contents after race condition!
-    #     self.assertLessEqual(len(slot_1.content), 2)
+    def test_concurrent_set_for_same_locator(self):
+        puts = []
+        puts_lock = Lock()
+        continue_lock = Lock()
+        continue_lock.acquire()
+        continued = Semaphore(0)
+        original_put = self.cache.block_store.put
+
+        def pause_put(*args, **kwargs):
+            # The joys of using a version of Python that was outmoded in 2008...
+            # http://stackoverflow.com/questions/3190706/nonlocal-keyword-in-python-2-x
+            with puts_lock:
+                puts.append(True)
+                pause = len(puts) == 1
+            if pause:
+                continue_lock.acquire()
+            continued.release()
+            original_put(*args, **kwargs)
+
+        self.cache.block_store.put = MagicMock(side_effect=pause_put)
+
+        slot_1, _ = self.cache.reserve_cache(LOCATOR_1)
+        slot_2, _ = self.cache.reserve_cache(LOCATOR_2)
+        Thread(target=slot_1.set, args=(bytearray(1),)).start()
+        Thread(target=slot_1.set, args=(bytearray(2),)).start()
+        Thread(target=slot_2.set, args=(bytearray(3),)).start()
+        continue_lock.release()
+
+        while len(puts) != 3:
+            continued.acquire()
+        self.assertEqual(bytearray(3), slot_2.content)
+        # No guarantees on value of slot contents after race condition!
+        self.assertLessEqual(len(slot_1.content), 2)
 
     def _create_cache(self, cache_size):
         block_store = RecordingBlockStore(

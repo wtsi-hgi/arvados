@@ -39,6 +39,7 @@ class TestBlockStore(unittest.TestCase):
         self.assertEqual(CONTENTS, self.block_store.get(LOCATOR_1))
 
     def test_put_maximum_amount(self):
+        # FIXME: Max amount is determined by the `calculate_stored_size` method
         contents = bytearray(CACHE_SIZE)
         self.block_store.put(LOCATOR_1, contents)
         self.assertEqual(contents, self.block_store.get(LOCATOR_1))
@@ -50,9 +51,17 @@ class TestBlockStore(unittest.TestCase):
         self.assertIsNone(self.block_store.get(LOCATOR_1))
 
     def test_delete_frees_space(self):
-        for _ in range(5):
-            self.block_store.put(LOCATOR_1, bytearray(CACHE_SIZE / 2))
-            self.block_store.delete(LOCATOR_1)
+        write_size = 1
+        while True:
+            contents = bytearray(write_size)
+            size_in_store = self.block_store.calculate_stored_size(contents)
+
+            if size_in_store <= CACHE_SIZE:
+                self.block_store.put(LOCATOR_1, contents)
+                self.block_store.delete(LOCATOR_1)
+                write_size *= 2
+            else:
+                break
 
 
 class TestInMemoryBlockStore(TestBlockStore):
