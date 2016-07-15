@@ -128,7 +128,7 @@ class LMDBBlockStore(BlockStore):
         # Note: This is an underestimate as it assumes all content will be at
         # least the size of a page
         size = self._map_size - (4 * page_size + LMDBBlockStore._HEADER_SIZE)
-        assert self._map_size >= page_size >= 0
+        assert self._map_size >= size >= 0
         return size
 
     def _get_page_size(self):
@@ -161,7 +161,8 @@ class BookkeepingBlockStore(BlockStore):
         return self._block_store.get(locator)
 
     def put(self, locator, content):
-        self.bookkeeper.record_put(locator, len(content))
+        stored_size = self.calculate_stored_size(content)
+        self.bookkeeper.record_put(locator, stored_size)
         return self._block_store.put(locator, content)
 
     def delete(self, locator):

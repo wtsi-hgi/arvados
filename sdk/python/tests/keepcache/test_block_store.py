@@ -5,9 +5,11 @@ from abc import ABCMeta, abstractmethod
 from bisect import bisect_left
 from tempfile import mkdtemp
 
-from math import ceil
-
-from arvados.keepcache.block_store import LMDBBlockStore, InMemoryBlockStore
+from arvados.keepcache.block_store import LMDBBlockStore, InMemoryBlockStore, \
+    BookkeepingBlockStore
+from arvados.keepcache.block_store_bookkeepers import \
+    InMemoryBlockStoreBookkeeper, BlockGetRecord, BlockPutRecord, \
+    BlockDeleteRecord
 from tests.keepcache._common import CONTENTS, CACHE_SIZE, LOCATOR_1
 
 
@@ -68,6 +70,8 @@ class TestBlockStore(unittest.TestCase):
             return self.block_store.calculate_stored_size(contents)
 
         sizes = _LazyCalculatedDict(size_to_actual_size_mapper)
+        # `bisect_left` used to find the size value that gets as close to the
+        # actual maximum size as possible without exceeding it
         actual_size = bisect_left(sizes, self.size, hi=self.size)
         assert self.size >= actual_size > 0
         contents = bytearray(actual_size)
@@ -90,7 +94,7 @@ class TestBlockStore(unittest.TestCase):
         size = int(CACHE_SIZE * proportion_capacity)
         assert size > 0
         contents = bytearray(size)
-        for _ in range(int(1 / proportion_capacity) * 100):
+        for _ in range(int(1 / proportion_capacity) * 10):
             assert self.block_store.get(LOCATOR_1) is None
             self.block_store.put(LOCATOR_1, contents)
             deleted = self.block_store.delete(LOCATOR_1)
@@ -125,13 +129,42 @@ class TestLMDBBlockStore(TestBlockStore):
         return block_store, block_store.calculate_usuable_size()
 
 
-# TODO
-# class TestRecordingBlockStore(TestBlockStore):
-#     """
-#     Tests for `BookkeepingBlockStore`.
-#     """
-#     def _create_block_store(self):
-#         return BookkeepingBlockStore()
+class TestBookkeepingBlockStore(TestBlockStore):
+    """
+    Tests for `BookkeepingBlockStore`.
+    """
+    def setUp(self):
+        super(TestBookkeepingBlockStore, self).setUp()
+        self.bookkeeper = self.block_store.bookkeeper
+
+    def test_records_get(self):
+        self.block_store.get(LOCATOR_1)
+        records = list(self.bookkeeper.get_all_records())
+        self.assertEqual(1, len(records))
+        self.assertIsInstance(records[0], BlockGetRecord)
+        self.assertEqual(LOCATOR_1, records[0].locator)
+
+    def test_records_put(self):
+        self.block_store.put(LOCATOR_1, CONTENTS)
+        records = list(self.bookkeeper.get_all_records())
+        self.assertEqual(1, len(records))
+        self.assertIsInstance(records[0], BlockPutRecord)
+        self.assertEqual(LOCATOR_1, records[0].locator)
+        self.assertEqual(
+            self.block_store.calculate_stored_size(CONTENTS), records[0].size)
+
+    def test_records_delete(self):
+        self.block_store.delete(LOCATOR_1)
+        records = list(self.bookkeeper.get_all_records())
+        self.assertEqual(1, len(records))
+        self.assertIsInstance(records[0], BlockDeleteRecord)
+        self.assertEqual(LOCATOR_1, records[0].locator)
+
+    def _create_block_store(self):
+        return BookkeepingBlockStore(
+            InMemoryBlockStore(),
+            InMemoryBlockStoreBookkeeper()
+        ), CACHE_SIZE
 
 
 # Work around to stop unittest from trying to run the abstract base class

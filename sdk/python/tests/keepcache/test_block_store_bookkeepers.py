@@ -36,7 +36,7 @@ class TestBlockStoreBookkeeper(unittest.TestCase):
         self.bookkeeper.record_delete("2")
         self.bookkeeper.record_put("2", 2)
         self.bookkeeper.record_put("3", 3)
-        self.assertEqual(6, self.bookkeeper.get_size())
+        self.assertEqual(6, self.bookkeeper.get_active_storage_size())
 
     def test_record_get(self):
         for locator in LOCATORS:

@@ -177,7 +177,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         # Given that the cache in this implementation does not grow beyond its
         # allocated size, this operation to trim the cache back down to size
         # should be a noop.
-        assert self.block_store.bookkeeper.get_size() <= self.cache_max
+        assert self.block_store.bookkeeper.get_active_storage_size() <= self.cache_max
 
     def create_cache_slot(self, locator, content=None):
         """
@@ -314,5 +314,5 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         :return: the space capacity in bytes
         :rtype: int
         """
-        return self.cache_max - (self.block_store.bookkeeper.get_size()
+        return self.cache_max - (self.block_store.bookkeeper.get_active_storage_size()
                                  + self._reserved_space)
