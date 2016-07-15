@@ -174,12 +174,13 @@ class TestBlockStoreBookkeeper(unittest.TestCase):
             record_setter(locator)
         assert len({record.timestamp for record in record_getter()}) == len(LOCATORS), \
             "Records must have different timestamps"
-        newest = sorted(record_getter(LOCATORS), key=lambda record: record.timestamp, reverse=True)[0]
+        newest = max(record_getter(LOCATORS), key=lambda record: record.timestamp)
         records = record_getter(since=newest.timestamp)
         self.assertEqual(1, len(records))
         record = list(records)[0]
         self.assertEqual(newest.locator, record.locator)
         self.assertEqual(newest.timestamp, record.timestamp)
+        self.assertIsInstance(record, record_type)
 
 
 class TestInMemoryBlockStoreBookkeeper(TestBlockStoreBookkeeper):

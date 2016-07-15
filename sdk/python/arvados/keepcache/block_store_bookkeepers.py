@@ -162,17 +162,21 @@ class BlockStoreBookkeeper(object):
         """
         return self._get_all_records_of_type(BlockDeleteRecord, locators, since)
 
-    def get_all_records(self):
+    def get_all_records(self, locators=None, since=None):
         """
-        Gets all of the recorded events.
+        Gets all of the recorded events with optional filters.
+        :param locators: optional locators to limit by
+        :type locators: Optional[Set[str]]
+        :param since: optionally filter out all records older than this value
+        :type since: Optional[datetime]
         :return: records of the events
         :rtype: Set[Record]
         """
         # This implementation is naive: it can be overriden if there is a more
-        # optimal method of getting all records from the implemented bookkeeper
-        return self.get_all_get_records() \
-               | self.get_all_put_records() \
-               | self.get_all_delete_records()
+        # optimal method of getting all records in the implemented bookkeeper
+        return self.get_all_get_records(locators, since) \
+               | self.get_all_put_records(locators, since) \
+               | self.get_all_delete_records(locators, since)
 
     def get_current_timestamp(self):
         """
@@ -234,8 +238,8 @@ class InMemoryBlockStoreBookkeeper(BlockStoreBookkeeper):
                 if record.timestamp > locator_records[record.locator].timestamp:
                     locator_records[record.locator] = record
 
-        return [record for record in locator_records.values()
-                if isinstance(record, BlockPutRecord)]
+        return {record for record in locator_records.values()
+                if isinstance(record, BlockPutRecord)}
 
     def record_get(self, locator):
         record = InMemoryBlockStoreBookkeeper.InMemoryBlockGetRecord(
