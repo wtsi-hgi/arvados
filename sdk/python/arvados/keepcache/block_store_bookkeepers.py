@@ -105,14 +105,15 @@ class BlockStoreBookkeeper(object):
         """
 
     @abstractmethod
-    def _get_all_records_of_type(self, record_type, locators):
+    def _get_all_records_of_type(self, record_type, locators, since):
         """
-        Gets all records of the given type, filtered to records related to the
-        given locators (if not `None`).
+        Gets all records of the given type, with optional filters.
         :param record_type: the type of the record
         :type record_type: type
         :param locators: optional locators to filter on
         :type locators: Optional[Set[str]]
+        :param since: optionally filter out all records older than this value
+        :type since: Optional[datetime]
         :return: the records
         :rtype: Set[Record]
         """
@@ -125,38 +126,41 @@ class BlockStoreBookkeeper(object):
         """
         return sum([put.size for put in self.get_active()])
 
-    def get_all_get_records(self, locators=None):
+    def get_all_get_records(self, locators=None, since=None):
         """
-        Gets all get records known about by this bookkeeper, optionally limited
-        to those related to blocks with one of the given locators.
+        Gets all get records known by this bookkeeper, with optional filters.
         :param locators: optional locators to limit by
-        :type locators: Set[str]
+        :type locators: Optional[Set[str]]
+        :param since: optionally filter out all records older than this value
+        :type since: Optional[datetime]
         :return: the get records
         :rtype: Set[BlockGetRecord]
         """
-        return self._get_all_records_of_type(BlockGetRecord, locators)
+        return self._get_all_records_of_type(BlockGetRecord, locators, since)
 
-    def get_all_put_records(self, locators=None):
+    def get_all_put_records(self, locators=None, since=None):
         """
-        Gets all put records known about by this bookkeeper, optionally limited
-        to those related to blocks with one of the given locators.
+        Gets all put records known by this bookkeeper, with optional filters.
         :param locators: optional locators to limit by
-        :type locators: Set[str]
+        :type locators: Optional[Set[str]]
+        :param since: optionally filter out all records older than this value
+        :type since: Optional[datetime]
         :return: the put records
         :rtype: Set[BlockPutRecord]
         """
-        return self._get_all_records_of_type(BlockPutRecord, locators)
+        return self._get_all_records_of_type(BlockPutRecord, locators, since)
 
-    def get_all_delete_records(self, locators=None):
+    def get_all_delete_records(self, locators=None, since=None):
         """
-        Gets all delete records known about by this bookkeeper, optionally
-        limited to those related to blocks with one of the given locators.
+        Gets all delete records known by this bookkeeper, with optional filters.
         :param locators: optional locators to limit by
-        :type locators: Set[str]
+        :type locators: Optional[Set[str]]
+        :param since: optionally filter out all records older than this value
+        :type since: Optional[datetime]
         :return: the delete records
         :rtype: Set[BlockDeleteRecord]
         """
-        return self._get_all_records_of_type(BlockDeleteRecord, locators)
+        return self._get_all_records_of_type(BlockDeleteRecord, locators, since)
 
     def get_all_records(self):
         """
@@ -169,6 +173,14 @@ class BlockStoreBookkeeper(object):
         return self.get_all_get_records() \
                | self.get_all_put_records() \
                | self.get_all_delete_records()
+
+    def get_current_timestamp(self):
+        """
+        Gets a timestamp for the current time.
+        :return: the current time
+        :rtype: datetime
+        """
+        return datetime.now()
 
 
 class InMemoryBlockStoreBookkeeper(BlockStoreBookkeeper):
@@ -227,26 +239,29 @@ class InMemoryBlockStoreBookkeeper(BlockStoreBookkeeper):
 
     def record_get(self, locator):
         record = InMemoryBlockStoreBookkeeper.InMemoryBlockGetRecord(
-            locator, datetime.now()
+            locator, self.get_current_timestamp()
         )
         self._records[BlockGetRecord].add(record)
 
     def record_put(self, locator, content_size):
         record = InMemoryBlockStoreBookkeeper.InMemoryBlockPutRecord(
-            locator, datetime.now(), content_size
+            locator, self.get_current_timestamp(), content_size
         )
         self._records[BlockPutRecord].add(record)
 
     def record_delete(self, locator):
         record = InMemoryBlockStoreBookkeeper.InMemoryBlockDeleteRecord(
-            locator, datetime.now()
+            locator, self.get_current_timestamp()
         )
         self._records[BlockDeleteRecord].add(record)
 
-    def _get_all_records_of_type(self, record_type, locators):
+    def _get_all_records_of_type(self, record_type, locators, since):
         records = self._records[record_type]
-        return records if locators is None else \
-            {record for record in records if record.locator in locators}
+        if locators is not None:
+            records = {record for record in records if record.locator in locators}
+        if since is not None:
+            records = {record for record in records if record.timestamp >= since}
+        return records
 
 
 class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
@@ -296,23 +311,6 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
                 return record_type
         return None
 
-    @staticmethod
-    def _create_record(cls, locator):
-        """
-        Creates a record of the given class type with the given locator and a
-        timestamp of now.
-        :param cls: the type of record (must be a subtype of `Record`)
-        :type cls: type
-        :param locator: the record's locator
-        :type locator: str
-        :return: the created record
-        :rtype: Record
-        """
-        record = cls()
-        record.locator = locator
-        record.timestamp = datetime.now()
-        return record
-
     def __init__(self, database_location):
         """
         Constructor.
@@ -344,34 +342,54 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
         return set(results)
 
     def record_get(self, locator):
-        record = SqlBlockStoreBookkeeper._create_record(
+        record = self._create_record(
             SqlBlockStoreBookkeeper._SqlAlchemyBlockGetRecord, locator)
         self._store(record)
 
     def record_put(self, locator, content_size):
-        record = SqlBlockStoreBookkeeper._create_record(
+        record = self._create_record(
             SqlBlockStoreBookkeeper._SqlAlchemyBlockPutRecord, locator)
         record.size = content_size
         self._store(record)
 
     def record_delete(self, locator):
-        record = SqlBlockStoreBookkeeper._create_record(
+        record = self._create_record(
             SqlBlockStoreBookkeeper._SqlAlchemyBlockDeleteRecord, locator)
         self._store(record)
 
-    def _get_all_records_of_type(self, record_type, locators):
+    def _get_all_records_of_type(self, record_type, locators, since):
         sql_record_type = SqlBlockStoreBookkeeper._get_sql_record_type(record_type)
         session = self._create_session()
-        if locators is None:
-            query = session.query(sql_record_type)
-        else:
-            query = session.query(sql_record_type).\
-                filter(sql_record_type.locator.in_(locators))
+        query = session.query(sql_record_type)
+        if locators is not None:
+            query = query.filter(sql_record_type.locator.in_(locators))
+        if since is not None:
+            query = query.filter(sql_record_type.timestamp >= since)
         records = query.all()
         session.close()
         return set(records)
 
+    def _create_record(self, cls, locator):
+        """
+        Creates a record of the given class type with the given locator and a
+        timestamp of now.
+        :param cls: the type of record (must be a subtype of `Record`)
+        :type cls: type
+        :param locator: the record's locator
+        :type locator: str
+        :return: the created record
+        :rtype: Record
+        """
+        record = cls()
+        record.locator = locator
+        record.timestamp = self.get_current_timestamp()
+        return record
+
     def _create_session(self):
+        """
+        Creates SQLAlchmeny session.
+        :return: SQLAlchemy session
+        """
         Session = sessionmaker(bind=self._engine)
         return Session()
 

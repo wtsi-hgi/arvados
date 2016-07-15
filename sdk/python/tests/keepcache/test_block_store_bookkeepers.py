@@ -3,6 +3,9 @@ import tempfile
 import unittest
 from abc import ABCMeta, abstractmethod
 
+from datetime import datetime
+from mock import MagicMock
+
 from arvados.keepcache.block_store_bookkeepers import \
     InMemoryBlockStoreBookkeeper, SqlBlockStoreBookkeeper, BlockGetRecord, \
     BlockDeleteRecord, BlockPutRecord
@@ -26,6 +29,13 @@ class TestBlockStoreBookkeeper(unittest.TestCase):
     def setUp(self):
         self.bookkeeper = self._create_bookkeeper()
 
+        # Make timestamps unqiue and deterministic
+        def create_timestamp():
+            return datetime(
+                self.bookkeeper.get_current_timestamp.call_count, 1, 1)
+        self.bookkeeper.get_current_timestamp = MagicMock(
+            side_effect=create_timestamp)
+
     def test_get_active_storage_size(self):
         self.bookkeeper.record_put("1", 1)
         for _ in range(10):
@@ -41,51 +51,48 @@ class TestBlockStoreBookkeeper(unittest.TestCase):
 
     def test_get_all_get_records(self):
         self._test_get_all_records_of_type(
-            self.bookkeeper.record_get,
-            self.bookkeeper.get_all_get_records,
-            BlockGetRecord
-        )
+            self.bookkeeper.record_get, self.bookkeeper.get_all_get_records, BlockGetRecord)
 
     def test_get_all_get_records_with_locators_filter(self):
         self._test_get_all_records_of_type_with_locators_filter(
-            self.bookkeeper.record_get,
-            self.bookkeeper.get_all_get_records,
-            BlockGetRecord
-        )
+            self.bookkeeper.record_get, self.bookkeeper.get_all_get_records, BlockGetRecord)
+
+    def test_get_all_get_records_with_since_filter(self):
+        self._test_get_all_records_of_type_with_since_filter(
+            self.bookkeeper.record_get, self.bookkeeper.get_all_get_records, BlockGetRecord)
 
     def test_get_all_put_records(self):
         def record_setter(locator):
             self.bookkeeper.record_put(locator, len(CONTENTS))
 
         self._test_get_all_records_of_type(
-            record_setter,
-            self.bookkeeper.get_all_put_records,
-            BlockPutRecord
-        )
+            record_setter, self.bookkeeper.get_all_put_records, BlockPutRecord)
 
     def test_get_all_put_records_with_locators_filter(self):
         def record_setter(locator):
             self.bookkeeper.record_put(locator, len(CONTENTS))
 
         self._test_get_all_records_of_type_with_locators_filter(
-            record_setter,
-            self.bookkeeper.get_all_put_records,
-            BlockPutRecord
-        )
+            record_setter, self.bookkeeper.get_all_put_records, BlockPutRecord)
+
+    def test_get_all_put_records_with_since_filter(self):
+        def record_setter(locator):
+            self.bookkeeper.record_put(locator, len(CONTENTS))
+
+        self._test_get_all_records_of_type_with_since_filter(
+            record_setter, self.bookkeeper.get_all_put_records, BlockPutRecord)
 
     def test_get_all_delete_records(self):
         self._test_get_all_records_of_type(
-            self.bookkeeper.record_delete,
-            self.bookkeeper.get_all_delete_records,
-            BlockDeleteRecord
-        )
+            self.bookkeeper.record_delete, self.bookkeeper.get_all_delete_records, BlockDeleteRecord)
 
     def test_get_all_delete_records_with_locators_filter(self):
         self._test_get_all_records_of_type_with_locators_filter(
-            self.bookkeeper.record_delete,
-            self.bookkeeper.get_all_delete_records,
-            BlockDeleteRecord
-        )
+            self.bookkeeper.record_delete, self.bookkeeper.get_all_delete_records, BlockDeleteRecord)
+
+    def test_get_all_delete_records_with_since_filter(self):
+        self._test_get_all_records_of_type_with_since_filter(
+            self.bookkeeper.record_delete, self.bookkeeper.get_all_delete_records, BlockDeleteRecord)
 
     def test_record_get(self):
         for locator in LOCATORS:
@@ -148,6 +155,31 @@ class TestBlockStoreBookkeeper(unittest.TestCase):
         record = list(records)[0]
         self.assertEqual(LOCATORS[0], record.locator)
         self.assertIsInstance(record, record_type)
+
+    def _test_get_all_records_of_type_with_since_filter(
+            self, record_setter, record_getter, record_type):
+        """
+        Tests get all records of a certain type with a filter on the timestamp
+        of records.
+        :param record_setter: adds record of the correct type in the bookkeeper,
+        where the first argument is the locator
+        :type record_type: Callable[[str], None]
+        :param record_getter: gets all records of the correct type from the
+        bookkeeper
+        :type record_getter: Callable[[], Set[Records]]
+        :param record_type: the type of record to get
+        :rtype: type
+        """
+        for locator in LOCATORS:
+            record_setter(locator)
+        assert len({record.timestamp for record in record_getter()}) == len(LOCATORS), \
+            "Records must have different timestamps"
+        newest = sorted(record_getter(LOCATORS), key=lambda record: record.timestamp, reverse=True)[0]
+        records = record_getter(since=newest.timestamp)
+        self.assertEqual(1, len(records))
+        record = list(records)[0]
+        self.assertEqual(newest.locator, record.locator)
+        self.assertEqual(newest.timestamp, record.timestamp)
 
 
 class TestInMemoryBlockStoreBookkeeper(TestBlockStoreBookkeeper):
