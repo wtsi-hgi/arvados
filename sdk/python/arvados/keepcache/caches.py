@@ -11,7 +11,9 @@ class KeepBlockCache(object):
     """
     Base class for Keep block caches.
 
-    This interface was extracted extracted from
+    This interface was extracted extracted from the implementation of the
+    existing Keep block cache in:
+    https://github.com/wtsi-hgi/arvados/blob/5f164d87da5241099d545b15ad537be69243a200/sdk/python/arvados/keep.py#L143-L213
     """
     __metaclass__ = ABCMeta
 

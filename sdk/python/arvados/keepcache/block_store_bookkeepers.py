@@ -79,14 +79,6 @@ class BlockStoreBookkeeper(object):
         """
 
     @abstractmethod
-    def get_all_records(self):
-        """
-        Gets all of the recorded events.
-        :return: records of the events
-        :rtype: Set[Record]
-        """
-
-    @abstractmethod
     def record_get(self, locator):
         """
         Records an access to the block in the store with the given locator.
@@ -112,13 +104,71 @@ class BlockStoreBookkeeper(object):
         :type locator: str
         """
 
+    @abstractmethod
+    def _get_all_records_of_type(self, record_type, locators):
+        """
+        Gets all records of the given type, filtered to records related to the
+        given locators (if not `None`).
+        :param record_type: the type of the record
+        :type record_type: type
+        :param locators: optional locators to filter on
+        :type locators: Optional[Set[str]]
+        :return: the records
+        :rtype: Set[Record]
+        """
+
     def get_active_storage_size(self):
         """
-        Gets the current  size of entires that are active in the block store.
+        Gets the current size of entires that are active in the block store.
         :return: the current size of the block store in bytes
         :rtype: int
         """
         return sum([put.size for put in self.get_active()])
+
+    def get_all_get_records(self, locators=None):
+        """
+        Gets all get records known about by this bookkeeper, optionally limited
+        to those related to blocks with one of the given locators.
+        :param locators: optional locators to limit by
+        :type locators: Set[str]
+        :return: the get records
+        :rtype: Set[BlockGetRecord]
+        """
+        return self._get_all_records_of_type(BlockGetRecord, locators)
+
+    def get_all_put_records(self, locators=None):
+        """
+        Gets all put records known about by this bookkeeper, optionally limited
+        to those related to blocks with one of the given locators.
+        :param locators: optional locators to limit by
+        :type locators: Set[str]
+        :return: the put records
+        :rtype: Set[BlockPutRecord]
+        """
+        return self._get_all_records_of_type(BlockPutRecord, locators)
+
+    def get_all_delete_records(self, locators=None):
+        """
+        Gets all delete records known about by this bookkeeper, optionally
+        limited to those related to blocks with one of the given locators.
+        :param locators: optional locators to limit by
+        :type locators: Set[str]
+        :return: the delete records
+        :rtype: Set[BlockDeleteRecord]
+        """
+        return self._get_all_records_of_type(BlockDeleteRecord, locators)
+
+    def get_all_records(self):
+        """
+        Gets all of the recorded events.
+        :return: records of the events
+        :rtype: Set[Record]
+        """
+        # This implementation is naive: it can be overriden if there is a more
+        # optimal method of getting all records from the implemented bookkeeper
+        return self.get_all_get_records() \
+               | self.get_all_put_records() \
+               | self.get_all_delete_records()
 
 
 class InMemoryBlockStoreBookkeeper(BlockStoreBookkeeper):
@@ -162,38 +212,41 @@ class InMemoryBlockStoreBookkeeper(BlockStoreBookkeeper):
         self._records = defaultdict(set)  # type: Dict[type, Set[Record]]
 
     def get_active(self):
-        PutRecord = InMemoryBlockStoreBookkeeper.InMemoryBlockPutRecord
-        puts = self._records[PutRecord]
-        deletes = self._records[InMemoryBlockStoreBookkeeper.InMemoryBlockDeleteRecord]
         locator_records = dict()  # type: Dict[str, Record]
 
-        for record in puts | deletes:
+        for record in self._records[BlockPutRecord] \
+                | self._records[BlockDeleteRecord]:
             if record.locator not in locator_records:
                 locator_records[record.locator] = record
             else:
                 if record.timestamp > locator_records[record.locator].timestamp:
                     locator_records[record.locator] = record
 
-        return [record for record in locator_records.values() if isinstance(record, PutRecord)]
-
-    def get_all_records(self):
-        records = set()     # type: Set[Record]
-        for record_type in self._records.keys():
-            records = records.union(self._records[record_type])
-        return records
+        return [record for record in locator_records.values()
+                if isinstance(record, BlockPutRecord)]
 
     def record_get(self, locator):
-        GetRecord = InMemoryBlockStoreBookkeeper.InMemoryBlockGetRecord
-        record = GetRecord(locator, datetime.now())
-        self._records[GetRecord].add(GetRecord(locator, datetime.now()))
+        record = InMemoryBlockStoreBookkeeper.InMemoryBlockGetRecord(
+            locator, datetime.now()
+        )
+        self._records[BlockGetRecord].add(record)
 
     def record_put(self, locator, content_size):
-        PutRecord = InMemoryBlockStoreBookkeeper.InMemoryBlockPutRecord
-        self._records[PutRecord].add(PutRecord(locator, datetime.now(), content_size))
+        record = InMemoryBlockStoreBookkeeper.InMemoryBlockPutRecord(
+            locator, datetime.now(), content_size
+        )
+        self._records[BlockPutRecord].add(record)
 
     def record_delete(self, locator):
-        DeleteRecord = InMemoryBlockStoreBookkeeper.InMemoryBlockDeleteRecord
-        self._records[DeleteRecord].add(DeleteRecord(locator, datetime.now()))
+        record = InMemoryBlockStoreBookkeeper.InMemoryBlockDeleteRecord(
+            locator, datetime.now()
+        )
+        self._records[BlockDeleteRecord].add(record)
+
+    def _get_all_records_of_type(self, record_type, locators):
+        records = self._records[record_type]
+        return records if locators is None else \
+            {record for record in records if record.locator in locators}
 
 
 class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
@@ -201,9 +254,9 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
     Bookkeeper of usage of a block store where records are kept in an SQL
     database.
     """
-    SQLAlchemyModel = declarative_base()
+    _SQLAlchemyModel = declarative_base()
 
-    class _SqlAlchemyBlockRecord(SQLAlchemyModel, BlockRecord):
+    class _SqlAlchemyBlockRecord(_SQLAlchemyModel, BlockRecord):
         __abstract__ = True
         __tablename__ = BlockRecord.__name__
         id = Column(Integer, primary_key=True)
@@ -219,6 +272,29 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
 
     class _SqlAlchemyBlockDeleteRecord(_SqlAlchemyBlockRecord, BlockDeleteRecord):
         __tablename__ = BlockDeleteRecord.__name__
+
+    SQL_ALCHEMY_RECORD_TYPES = [
+        _SqlAlchemyBlockGetRecord,
+        _SqlAlchemyBlockPutRecord,
+        _SqlAlchemyBlockDeleteRecord
+    ]
+
+    @staticmethod
+    def _get_sql_record_type(generic_type):
+        """
+        Gets the SQL record type that is a subclass of the generic block record
+        type given.
+        :param generic_type: the generic record type
+        :type generic_type: type
+        :return: the SQL record type else `None` if none found
+        :rtype: Optional[type]
+        """
+        assert issubclass(generic_type, BlockRecord)
+        for record_type in SqlBlockStoreBookkeeper.SQL_ALCHEMY_RECORD_TYPES:
+            assert issubclass(record_type, SqlBlockStoreBookkeeper._SQLAlchemyModel)
+            if issubclass(record_type, generic_type):
+                return record_type
+        return None
 
     @staticmethod
     def _create_record(cls, locator):
@@ -244,41 +320,28 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
         :type database_location: str
         """
         self._engine = create_engine(database_location)
-        SqlBlockStoreBookkeeper.SQLAlchemyModel.metadata.create_all(
+        SqlBlockStoreBookkeeper._SQLAlchemyModel.metadata.create_all(
             bind=self._engine)
 
     def get_active(self):
-        Put = SqlBlockStoreBookkeeper._SqlAlchemyBlockPutRecord
-        Delete = SqlBlockStoreBookkeeper._SqlAlchemyBlockDeleteRecord
+        PutRecord = SqlBlockStoreBookkeeper._SqlAlchemyBlockPutRecord
+        DeleteRecord = SqlBlockStoreBookkeeper._SqlAlchemyBlockDeleteRecord
         session = self._create_session()
-
-        subquery = session.query(Put, func.max(Delete.timestamp).label(
+        subquery = session.query(PutRecord, func.max(DeleteRecord.timestamp).label(
             "latest_delete")). \
-            join(Delete, Put.locator == Delete.locator). \
-            group_by(Put.locator). \
+            join(DeleteRecord, PutRecord.locator == DeleteRecord.locator). \
+            group_by(PutRecord.locator). \
             subquery()
 
-        results = session.query(Put). \
-            outerjoin(subquery, subquery.c.locator == Put.locator). \
+        query = session.query(PutRecord). \
+            outerjoin(subquery, subquery.c.locator == PutRecord.locator). \
             filter(or_(
             subquery.c.latest_delete == None,
-            Put.timestamp > subquery.c.latest_delete
-        )).all()
+            PutRecord.timestamp > subquery.c.latest_delete
+        ))
+        results = query.all()
         session.close()
         return set(results)
-
-    def get_all_records(self):
-        session = self._create_session()
-        record_types = [
-            SqlBlockStoreBookkeeper._SqlAlchemyBlockGetRecord,
-            SqlBlockStoreBookkeeper._SqlAlchemyBlockPutRecord,
-            SqlBlockStoreBookkeeper._SqlAlchemyBlockDeleteRecord
-        ]
-        all_records = set()     # type: Set[Record]
-        for record_type in record_types:
-            records = session.query(record_type).all()
-            all_records = all_records.union(records)
-        return all_records
 
     def record_get(self, locator):
         record = SqlBlockStoreBookkeeper._create_record(
@@ -295,6 +358,18 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
         record = SqlBlockStoreBookkeeper._create_record(
             SqlBlockStoreBookkeeper._SqlAlchemyBlockDeleteRecord, locator)
         self._store(record)
+
+    def _get_all_records_of_type(self, record_type, locators):
+        sql_record_type = SqlBlockStoreBookkeeper._get_sql_record_type(record_type)
+        session = self._create_session()
+        if locators is None:
+            query = session.query(sql_record_type)
+        else:
+            query = session.query(sql_record_type).\
+                filter(sql_record_type.locator.in_(locators))
+        records = query.all()
+        session.close()
+        return set(records)
 
     def _create_session(self):
         Session = sessionmaker(bind=self._engine)

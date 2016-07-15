@@ -35,3 +35,4 @@ class FIFOCacheReplacementPolicy(CacheReplacementPolicy):
             if record.timestamp < oldest[0]:
                 oldest = (record.timestamp, record.locator)
         return str(oldest[1])
+
