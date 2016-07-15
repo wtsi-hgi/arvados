@@ -129,8 +129,8 @@ class TestKeepBlockCacheWithBlockStore(TestKeepBlockCache):
                 pause = len(puts) == 1
             if pause:
                 continue_lock.acquire()
-            continued.release()
             original_put(*args, **kwargs)
+            continued.release()
 
         self.cache.block_store.put = MagicMock(side_effect=pause_put)
 
