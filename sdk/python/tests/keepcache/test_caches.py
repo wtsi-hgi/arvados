@@ -6,10 +6,10 @@ from threading import Thread
 
 from mock import MagicMock
 
-from arvados.keepcache.block_store import RecordingBlockStore, \
+from arvados.keepcache.block_store import BookkeepingBlockStore, \
     InMemoryBlockStore
-from arvados.keepcache.block_store_recorder import \
-    InMemoryBlockStoreUsageRecorder
+from arvados.keepcache.block_store_bookkeepers import \
+    InMemoryBlockStoreBookkeeper
 from arvados.keepcache.caches import InMemoryKeepBlockCache, \
     KeepBlockCacheWithBlockStore
 from arvados.keepcache.slots import CacheSlot
@@ -148,9 +148,9 @@ class TestKeepBlockCacheWithBlockStore(TestKeepBlockCache):
         self.assertLessEqual(len(slot_1.content), 2)
 
     def _create_cache(self, cache_size):
-        block_store = RecordingBlockStore(
+        block_store = BookkeepingBlockStore(
             InMemoryBlockStore(),
-            InMemoryBlockStoreUsageRecorder()
+            InMemoryBlockStoreBookkeeper()
         )
         return KeepBlockCacheWithBlockStore(block_store, cache_size)
 

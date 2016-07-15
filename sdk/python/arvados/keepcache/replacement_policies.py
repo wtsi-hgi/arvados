@@ -16,7 +16,7 @@ class CacheReplacementPolicy(object):
 
         Return `None` if no blocks can be removed.
         :param block_store_usage_recorder:
-        :type block_store_usage_recorder: BlockStoreUsageRecorder
+        :type block_store_usage_recorder: BlockStoreBookkeeper
         :return:
         :rtype: Optional[str]
         """

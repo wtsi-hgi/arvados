@@ -140,33 +140,34 @@ class LMDBBlockStore(BlockStore):
         return self._database.stat()["psize"]
 
 
-class RecordingBlockStore(BlockStore):
+class BookkeepingBlockStore(BlockStore):
     """
-    Block store that records accesses and modifications to entries.
+    Block store that uses a bookkeeper to record accesses and modifications to
+    entries in an underlying block store.
     """
-    def __init__(self, block_store, block_store_usage_recorder):
+    def __init__(self, block_store, bookkeeper):
         """
         Constructor.
         :param block_store: the block store to record use of
         :type block_store: BlockStore
-        :param block_store_usage_recorder: recorder
-        :type block_store_usage_recorder: BlockStoreUsageRecorder
+        :param bookkeeper: bookkeeper
+        :type bookkeeper: BlockStoreBookkeeper
         """
         self._block_store = block_store
-        self.recorder = block_store_usage_recorder
+        self.bookkeeper = bookkeeper
 
     def get(self, locator):
-        self.recorder.record_get(locator)
+        self.bookkeeper.record_get(locator)
         return self._block_store.get(locator)
 
     def put(self, locator, content):
-        self.recorder.record_put(locator, len(content))
+        self.bookkeeper.record_put(locator, len(content))
         return self._block_store.put(locator, content)
 
     def delete(self, locator):
         return_value = self._block_store.delete(locator)
         # Better to think things are in the store rather than not
-        self.recorder.record_delete(locator)
+        self.bookkeeper.record_delete(locator)
         return return_value
 
     def calculate_stored_size(self, content):

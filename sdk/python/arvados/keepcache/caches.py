@@ -133,7 +133,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         """
         Constructor.
         :param block_store: store for blocks
-        :type block_store: RecordingBlockStore
+        :type block_store: BookkeepingBlockStore
         :param cache_max: maximum cache size (default: 20GB)
         :type cache_max: int
         :param cache_replacement_policy: TODO
@@ -177,7 +177,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         # Given that the cache in this implementation does not grow beyond its
         # allocated size, this operation to trim the cache back down to size
         # should be a noop.
-        assert self.block_store.recorder.get_size() <= self.cache_max
+        assert self.block_store.bookkeeper.get_size() <= self.cache_max
 
     def create_cache_slot(self, locator, content=None):
         """
@@ -283,10 +283,11 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
             write_wait = threading.Semaphore(0)
             while self._get_spare_capacity() < space:
                 delete_locator = self._cache_replacement_policy.next_to_delete(
-                    self.block_store.recorder)
+                    self.block_store.bookkeeper)
 
                 if delete_locator is not None:
-                    assert delete_locator in [put.locator for put in self.block_store.recorder.get_active()]
+                    assert delete_locator in [put.locator for put
+                                              in self.block_store.bookkeeper.get_active()]
                     deleted = self.block_store.delete(delete_locator)
                     assert deleted
                 else:
@@ -313,5 +314,5 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         :return: the space capacity in bytes
         :rtype: int
         """
-        return self.cache_max - (self.block_store.recorder.get_size()
+        return self.cache_max - (self.block_store.bookkeeper.get_size()
                                  + self._reserved_space)

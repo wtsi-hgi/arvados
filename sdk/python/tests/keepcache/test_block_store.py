@@ -128,10 +128,10 @@ class TestLMDBBlockStore(TestBlockStore):
 # TODO
 # class TestRecordingBlockStore(TestBlockStore):
 #     """
-#     Tests for `RecordingBlockStore`.
+#     Tests for `BookkeepingBlockStore`.
 #     """
 #     def _create_block_store(self):
-#         return RecordingBlockStore()
+#         return BookkeepingBlockStore()
 
 
 # Work around to stop unittest from trying to run the abstract base class

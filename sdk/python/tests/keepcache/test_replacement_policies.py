@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from abc import ABCMeta
 
-from arvados.keepcache.block_store_recorder import DatabaseBlockStoreUsageRecorder, \
-    InMemoryBlockStoreUsageRecorder
+from arvados.keepcache.block_store_bookkeepers import SqlBlockStoreBookkeeper, \
+    InMemoryBlockStoreBookkeeper
 from arvados.keepcache.replacement_policies import FIFOCacheReplacementPolicy
 from tests.keepcache._common import LOCATOR_1, LOCATOR_2
 
@@ -18,7 +18,7 @@ class CacheReplacementPolicy(unittest.TestCase):
     __metaclass__ = ABCMeta
 
     def setUp(self):
-        self.recorder = InMemoryBlockStoreUsageRecorder()
+        self.recorder = InMemoryBlockStoreBookkeeper()
 
 
 class TestFIFOCacheReplacementPolicy(CacheReplacementPolicy):
