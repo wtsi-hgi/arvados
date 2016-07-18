@@ -60,7 +60,3 @@ class LastUsedReplacementPolicy(CacheReplacementPolicy):
                     or record.timestamp > records[locator].timestamp:
                 records[locator] = record
         return min(records.values(), key=lambda record: record.timestamp).locator
-
-
-
-

@@ -42,7 +42,7 @@ class KeepBlockCache(object):
         Gets the cache slot with the given locator.
         :param locator: the identifier of the entry in this cache
         :type locator: str
-        :return: the cache if found, else `None`
+        :return: the cache slot if found, else `None`
         :rtype: Optional[CacheSlot]
         """
 
@@ -178,7 +178,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
     def cap_cache(self):
         # Given that the cache in this implementation does not grow beyond its
         # allocated size, this operation to trim the cache back down to size
-        # should be a noop.
+        # should be a no-op.
         assert self.block_store.bookkeeper.get_active_storage_size() <= self.cache_max
 
     def create_cache_slot(self, locator, content=None):
