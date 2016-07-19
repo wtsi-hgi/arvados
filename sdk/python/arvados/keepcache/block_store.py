@@ -1,4 +1,6 @@
+import os
 from abc import ABCMeta, abstractmethod
+from base64 import urlsafe_b64encode
 from math import ceil
 
 import lmdb
@@ -76,6 +78,54 @@ class InMemoryBlockStore(BlockStore):
 
     def calculate_stored_size(self, content):
         return len(content)
+
+
+class DiskOnlyBlockStore(BlockStore):
+    """
+    Blocks store that writes blocks to disk without any fanciness.
+    """
+    def __init__(self, directory):
+        """
+        Constructor.
+        :param directory: the directory to write blocks to (will be created if
+        does not exist)
+        :type directory: str
+        """
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+        self._directory = directory
+
+    def get(self, locator):
+        path = self._get_path(locator)
+        if not os.access(path, os.R_OK):
+            return None
+        return open(path, "r").read()
+
+    def put(self, locator, content):
+        with open(self._get_path(locator), "w+") as file:
+            file.write(content)
+
+    def delete(self, locator):
+        path = self._get_path(locator)
+        if not os.access(path, os.R_OK):
+            return False
+        os.remove(path)
+        return True
+
+    def calculate_stored_size(self, content):
+        return len(content)
+
+    def _get_path(self, locator):
+        """
+        Gets the path to the file related to the given locator.
+        :param locator: the locator
+        :type locator: str
+        :return: the file path
+        :rtype: str
+        """
+        # Translation from untrusted locator to safe file name
+        locator = urlsafe_b64encode(locator)
+        return os.path.join(self._directory, locator)
 
 
 class LMDBBlockStore(BlockStore):

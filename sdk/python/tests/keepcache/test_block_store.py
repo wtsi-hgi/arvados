@@ -6,7 +6,7 @@ from bisect import bisect_left
 from tempfile import mkdtemp
 
 from arvados.keepcache.block_store import LMDBBlockStore, InMemoryBlockStore, \
-    BookkeepingBlockStore, RocksDBBlockStore
+    BookkeepingBlockStore, RocksDBBlockStore, DiskOnlyBlockStore
 from arvados.keepcache.block_store_bookkeepers import \
     InMemoryBlockStoreBookkeeper, BlockGetRecord, BlockPutRecord, \
     BlockDeleteRecord
@@ -123,6 +123,17 @@ class TestInMemoryBlockStore(TestBlockStore):
     """
     def _create_block_store(self):
         return InMemoryBlockStore(), CACHE_SIZE
+
+
+class TestDiskOnlyBlockStore(TestBlockStore):
+    """
+    Tests for `DiskOnlyBlockStore`.
+    """
+
+    def _create_block_store(self):
+        temp_directory = self._create_temp_directory()
+        block_store = DiskOnlyBlockStore(temp_directory)
+        return block_store, CACHE_SIZE
 
 
 class TestLMDBBlockStore(TestBlockStore):
