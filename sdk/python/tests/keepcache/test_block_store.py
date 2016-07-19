@@ -6,7 +6,7 @@ from bisect import bisect_left
 from tempfile import mkdtemp
 
 from arvados.keepcache.block_store import LMDBBlockStore, InMemoryBlockStore, \
-    BookkeepingBlockStore
+    BookkeepingBlockStore, RocksDBBlockStore
 from arvados.keepcache.block_store_bookkeepers import \
     InMemoryBlockStoreBookkeeper, BlockGetRecord, BlockPutRecord, \
     BlockDeleteRecord
@@ -49,7 +49,12 @@ class TestBlockStore(unittest.TestCase):
         """
 
     def setUp(self):
+        self._temp_directories = []
         self.block_store, self.size = self._create_block_store()
+
+    def tearDown(self):
+        for directory in self._temp_directories:
+            shutil.rmtree(directory)
 
     def test_put_and_get(self):
         self.block_store.put(LOCATOR_1, CONTENTS)
@@ -101,6 +106,16 @@ class TestBlockStore(unittest.TestCase):
             assert deleted
             self.assertIsNone(self.block_store.get(LOCATOR_1))
 
+    def _create_temp_directory(self):
+        """
+        Creates a temporary directory that is deleted upon tear down.
+        :return: the temporary directory
+        :rtype: str
+        """
+        temp_directory = mkdtemp()
+        self._temp_directories.append(temp_directory)
+        return temp_directory
+
 
 class TestInMemoryBlockStore(TestBlockStore):
     """
@@ -114,19 +129,19 @@ class TestLMDBBlockStore(TestBlockStore):
     """
     Tests for `LMDBBlockStore`.
     """
-    def setUp(self):
-        self._temp_directories = []
-        super(TestLMDBBlockStore, self).setUp()
-
-    def tearDown(self):
-        for directory in self._temp_directories:
-            shutil.rmtree(directory)
-
     def _create_block_store(self):
-        temp_directory = mkdtemp()
-        self._temp_directories.append(temp_directory)
+        temp_directory = self._create_temp_directory()
         block_store = LMDBBlockStore(temp_directory, CACHE_SIZE)
         return block_store, block_store.calculate_usuable_size()
+
+
+class TestRocksDBBlockStore(TestBlockStore):
+    """
+    Tests for `RocksDBBlockStore`.
+    """
+    def _create_block_store(self):
+        temp_directory = self._create_temp_directory()
+        return RocksDBBlockStore(temp_directory), CACHE_SIZE
 
 
 class TestBookkeepingBlockStore(TestBlockStore):
