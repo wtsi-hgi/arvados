@@ -85,7 +85,7 @@ class TestInMemoryKeepBlockCache(TestKeepBlockCache):
     """
     def test_cap_cache_when_over_max_cache_size(self):
         # This test is not universal for all `KeepBlockCache` implementations
-        # as not all (strangly) allow the cache to exceed its max size
+        # as not all (strangely) allow the cache to exceed its max size
         slot, _ = self.cache.reserve_cache(LOCATOR_1)
         slot.set(bytearray(CACHE_SIZE + 1))
         self.cache.cap_cache()

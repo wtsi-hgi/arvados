@@ -142,8 +142,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         :type cache_replacement_policy: CacheReplacementPolicy
         """
         super(KeepBlockCacheWithBlockStore, self).__init__(cache_max)
-        # TODO: Make block store read-only
-        self.block_store = block_store
+        self._block_store = block_store
         self._cache_replacement_policy = cache_replacement_policy
         self._referenced_cache_slots = WeakValueDictionary()
         self._referenced_cache_slots_lock = threading.Lock()
@@ -152,6 +151,15 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         self._writing_complete_listeners = defaultdict(set)
         self._reserved_space = 0
         self._space_increase_lock = threading.Lock()
+
+    @property
+    def block_store(self):
+        """
+        Gets the block store used by this cache.
+        :return: the block store
+        :rtype: BlockStore
+        """
+        return self._block_store
 
     def get(self, locator):
         # Return pre-existing model of slot if referenced elsewhere. This is
