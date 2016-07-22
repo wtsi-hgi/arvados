@@ -235,8 +235,9 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         There will be a race condition if there are concurrent requests to write
         different content for the same locator. Given that the locator is a hash
         of the contents, it is highly unlikely that such condition will occur.
-        Given that `InMemoryKeepBlockCache` also suffers from this race condition,
-        it is assumed that it is safe to ignore it.
+
+        As `InMemoryKeepBlockCache` also suffers from this race condition, it is
+        assumed that it is safe to ignore it.
         :param locator: content identifier
         :type locator: str
         :param content: the content
@@ -246,7 +247,8 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         writing_locator_content = True
         while writing_locator_content:
             if self._get_content(locator) == content:
-                # No point in writing same contents
+                # No point in writing same contents, which is highly likely
+                # given that the locator is a hash of the contents
                 return
 
             self._writing_lock.acquire()
@@ -262,24 +264,26 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
                 self._writing_complete_listeners[locator].add(write_wait)
                 self._writing_lock.release()
                 write_wait.acquire()
-                # Given that the locator is a hash of the content is highly
+                # Given that the locator is a hash of the content, it is highly
                 # likely at this point that the content has already been written
 
         required_space = self.block_store.calculate_stored_size(content)
         self._reserve_space_in_cache(required_space)
+        assert self.block_store.bookkeeper.get_active_storage_size() + required_space <= self._cache_max
         self.block_store.put(locator, content)
         self._reserved_space -= required_space
 
         with self._writing_lock:
             self._writing.remove(locator)
-        while len(self._writing_complete_listeners[locator]) > 0:
-            listener = self._writing_complete_listeners[locator].pop()
-            listener.release()
+            while len(self._writing_complete_listeners[locator]) > 0:
+                listener = self._writing_complete_listeners[locator].pop()
+                listener.release()
+            del self._writing_complete_listeners[locator]
 
     def _reserve_space_in_cache(self, space):
         """
-        Reserves the given amount of space in the cache. Will delete older
-        entries in order to get the space.
+        Reserves the given amount of space in the cache. Uses cache replacement
+        policy to delete existing entries if more space is required.
 
         Will raise a `ValueError` if the given space is more than the total
         cache space

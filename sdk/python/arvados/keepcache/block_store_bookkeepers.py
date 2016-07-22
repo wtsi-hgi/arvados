@@ -120,7 +120,7 @@ class BlockStoreBookkeeper(object):
 
     def get_active_storage_size(self):
         """
-        Gets the current size of entires that are active in the block store.
+        Gets the current size of entries that are active in the block store.
         :return: the current size of the block store in bytes
         :rtype: int
         """

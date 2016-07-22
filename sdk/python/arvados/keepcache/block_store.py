@@ -45,7 +45,6 @@ class BlockStore(object):
         :rtype: bool
         """
 
-    @abstractmethod
     def calculate_stored_size(self, content):
         """
         Calculates how much size the given content will take up when stored
@@ -55,6 +54,8 @@ class BlockStore(object):
         :return: size of content when stored in bytes
         :rtype: int
         """
+        # Basic calculation that should be overriden if required
+        return len(content)
 
 
 class InMemoryBlockStore(BlockStore):
@@ -111,9 +112,6 @@ class DiskOnlyBlockStore(BlockStore):
             return False
         os.remove(path)
         return True
-
-    def calculate_stored_size(self, content):
-        return len(content)
 
     def _get_path(self, locator):
         """
@@ -176,9 +174,9 @@ class LMDBBlockStore(BlockStore):
         :rtype: int
         """
         page_size = self._get_page_size()
-        # Note: This is an underestimate as it assumes all content will be at
-        # least the size of a page
-        size = self._map_size - (4 * page_size + LMDBBlockStore._HEADER_SIZE)
+        # Fixed cost (e.g. the pointer to the data root, free list root, etc)
+        fixed_cost = 4 * page_size + LMDBBlockStore._HEADER_SIZE
+        size = self._map_size - fixed_cost
         assert self._map_size >= size >= 0
         return size
 
