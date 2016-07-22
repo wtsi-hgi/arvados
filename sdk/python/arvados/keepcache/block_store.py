@@ -2,6 +2,7 @@ import os
 from abc import ABCMeta, abstractmethod
 from base64 import urlsafe_b64encode
 from math import ceil
+from weakref import WeakValueDictionary
 
 import lmdb
 import rocksdb
@@ -77,9 +78,6 @@ class InMemoryBlockStore(BlockStore):
         del self._data[locator]
         return True
 
-    def calculate_stored_size(self, content):
-        return len(content)
-
 
 class DiskOnlyBlockStore(BlockStore):
     """
@@ -132,6 +130,30 @@ class LMDBBlockStore(BlockStore):
     """
     _HEADER_SIZE = 16
 
+    class _TrackedBuffer():
+        """
+        TODO
+        """
+        def __init__(self, underlying_buffer):
+            self.underlying_buffer = underlying_buffer
+            self._valid = True
+
+        def invalidate(self):
+            self._valid = False
+            # Throw away reference to underlying buffer to close it
+            self.underlying_buffer = None
+
+        def __getitem__(self, index):
+            if not self._valid:
+                raise IOError("The buffer cannot be read as it has been invalidated")
+            return self.underlying_buffer[index]
+
+        def __len__(self):
+            return len(self.underlying_buffer)
+
+        def __str__(self):
+            return str(self.underlying_buffer)
+
     def __init__(self, directory, map_size):
         """
         Constructor.
@@ -144,24 +166,39 @@ class LMDBBlockStore(BlockStore):
         """
         self._database = lmdb.open(directory, writemap=True, map_size=map_size)
         self._map_size = map_size
+        self._active_buffers = WeakValueDictionary()
 
     def get(self, locator):
-        with self._database.begin() as transaction:
-            return transaction.get(locator)
+        if self._active_buffers[locator]:
+            return self._active_buffers[locator]
+
+        with self._database.begin(buffers=True) as transaction:
+            content = transaction.get(locator)
+        self._active_buffers[locator] = LMDBBlockStore._TrackedBuffer(content)
 
     def put(self, locator, content):
         with self._database.begin(write=True) as transaction:
             transaction.put(locator, content)
+        active_buffer = self._active_buffers.get(locator)
+
+        if active_buffer is not None and active_buffer.valid:
+            # Content overwritten - reload buffer
+            active_buffer.underlying_buffer = self.get(locator)
 
     def delete(self, locator):
+        active_buffer = self._active_buffers.get(locator)
+        if active_buffer is not None and active_buffer.valid:
+            # Invalid existing buffer so that old copy can be cleaned up
+            active_buffer.invalidate()
+
         with self._database.begin(write=True) as transaction:
             return transaction.delete(locator)
 
     def calculate_stored_size(self, content):
-        # TODO: if max_key_size + size <= 2040, LMDB will store multiple entries
+        # Note: if max_key_size + size <= 2040, LMDB will store multiple entries
         # per page. This implementation currently assumes one entry per page at
         # the expense of a small amount of wasted space. Given that most Keep
-        # blocks will be large, the loss will be relatively small
+        # blocks will be large, the loss will be relatively small.
         size = len(content)
         page_size = self._get_page_size()
         max_key_size = self._database.max_key_size()
