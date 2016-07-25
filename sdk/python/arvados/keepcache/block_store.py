@@ -1,8 +1,9 @@
 import os
 from abc import ABCMeta, abstractmethod
 from base64 import urlsafe_b64encode
+from collections import defaultdict
 from math import ceil
-from threading import Thread, Lock
+from threading import Thread, Event
 from weakref import WeakValueDictionary
 
 import lmdb
@@ -181,10 +182,8 @@ class BufferedBlockStore(BlockStore):
             if isinstance(other, type(self)):
                 return other.underlying_buffer == self.underlying_buffer \
                        and other.valid == self.valid
-            if isinstance(other, bytearray):
-                # XXX: Loss of symmetric equality :(
-                return other == self.underlying_buffer
-            return False
+            # XXX: Loss of symmetric equality :(
+            return other == self.underlying_buffer
 
     def __init__(self):
         """
@@ -252,11 +251,28 @@ class LMDBBlockStore(BufferedBlockStore):
         if existing_buffer is not None:
             return existing_buffer
 
-        with self._database.begin(buffers=True) as transaction:
-            content = transaction.get(locator)
+        read_event = Event()
+        content = []
 
-        if content is None:
+        def read():
+            with self._database.begin(buffers=True) as transaction:
+                # Strange use of list instead of `nonlocal` due to use of
+                # version of Python that was outmoded in 2008...
+                # http://stackoverflow.com/questions/3190706/nonlocal-keyword-in-python-2-x
+                content.append(transaction.get(locator))
+            read_event.set()
+
+        reader = Thread(target=read)
+        self._readers.add(reader)
+        reader.start()
+        read_event.wait()
+        self._readers.remove(reader)
+
+        if len(content) == 0 or content[0] is None:
             return None
+        else:
+            assert len(content) == 1
+            content = content[0]
         return super(LMDBBlockStore, self).track(locator, content)
 
     def put(self, locator, content):
