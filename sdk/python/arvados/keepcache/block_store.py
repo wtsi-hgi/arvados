@@ -2,6 +2,7 @@ import os
 from abc import ABCMeta, abstractmethod
 from base64 import urlsafe_b64encode
 from math import ceil
+from threading import Thread, Lock
 from weakref import WeakValueDictionary
 
 import lmdb
@@ -124,21 +125,47 @@ class DiskOnlyBlockStore(BlockStore):
         return os.path.join(self._directory, locator)
 
 
-class LMDBBlockStore(BlockStore):
+class BufferedBlockStore(BlockStore):
     """
-    Block store backed by Lightning Memory-Mapped Database (LMDB).
+    Block store that returns buffers to data.
     """
-    _HEADER_SIZE = 16
+    __metaclass__ = ABCMeta
 
-    class _TrackedBuffer():
+    class TrackedBuffer():
         """
-        TODO
+        A (pseudo) buffer, which can be invalidated and modified "remotely".
         """
         def __init__(self, underlying_buffer):
+            """
+            Constructor.
+            :param underlying_buffer: the underlying, actual buffer
+            :type underlying_buffer: buffer
+            """
+            self.underlying_buffer = None
+            self._valid = False
+            self.set(underlying_buffer)
+
+        @property
+        def valid(self):
+            """
+            Whether the buffer is still valid.
+            :return: the validity of the buffer
+            :rtype: bool
+            """
+            return self._valid
+
+        def set(self, underlying_buffer):
+            """
+            Sets the underlying buffer, setting it to valid.
+            :param underlying_buffer: the underlying buffer
+            """
             self.underlying_buffer = underlying_buffer
             self._valid = True
 
         def invalidate(self):
+            """
+            Invalidates the buffer.
+            """
             self._valid = False
             # Throw away reference to underlying buffer to close it
             self.underlying_buffer = None
@@ -148,11 +175,69 @@ class LMDBBlockStore(BlockStore):
                 raise IOError("The buffer cannot be read as it has been invalidated")
             return self.underlying_buffer[index]
 
+        # TODO: Change to use to make this class as close to the buffer class as possible
+        # def __getattr__( self, name):
+
         def __len__(self):
             return len(self.underlying_buffer)
 
         def __str__(self):
             return str(self.underlying_buffer)
+
+        def __eq__(self, other):
+            if isinstance(other, type(self)):
+                return other.underlying_buffer == self.underlying_buffer \
+                       and other.valid == self.valid
+            if isinstance(other, bytearray):
+                # TODO: Loss of symmetric equality...
+                return other == self.underlying_buffer
+            return False
+
+    def __init__(self):
+        """
+        Constructor.
+        """
+        self._active_buffers = WeakValueDictionary()  # type: Dict[str, BufferedBlockStore.TrackedBuffer]
+
+    def get(self, locator):
+        active_buffer = self._active_buffers.get(locator, None)
+        return active_buffer if active_buffer is not None and active_buffer.valid else None
+
+    def put(self, locator, content):
+        active_buffer = self._active_buffers.get(locator)
+        if active_buffer is not None:
+            if active_buffer.underlying_buffer != content:
+                # Content overwritten - reload buffer
+                active_buffer.set(content)
+        else:
+            self.track(locator, content)
+
+    def delete(self, locator):
+        active_buffer = self._active_buffers.get(locator)
+        if active_buffer is not None and active_buffer.valid:
+            # Invalid existing buffer so that old copy can be cleaned up
+            active_buffer.invalidate()
+
+    def track(self, locator, content):
+        """
+        Tracks pointers to the content associated to the given locator.
+        :param locator: the content's locator
+        :type locator: str
+        :param content: the content to track
+        :type content: buffer
+        :return: the content in a form that can be tracked
+        :rtype: BufferedBlockStore.TrackedBuffer
+        """
+        tracked_content = BufferedBlockStore.TrackedBuffer(content)
+        self._active_buffers[locator] = tracked_content
+        return tracked_content
+
+
+class LMDBBlockStore(BufferedBlockStore):
+    """
+    Block store backed by Lightning Memory-Mapped Database (LMDB).
+    """
+    _HEADER_SIZE = 16
 
     def __init__(self, directory, map_size):
         """
@@ -164,33 +249,30 @@ class LMDBBlockStore(BlockStore):
         :param map_size: maximum size that the database can grow to in bytes
         :type map_size: int
         """
+        super(LMDBBlockStore, self).__init__()
         self._database = lmdb.open(directory, writemap=True, map_size=map_size)
         self._map_size = map_size
-        self._active_buffers = WeakValueDictionary()
+        self._readers = set()   # type: Set[Thread]
 
     def get(self, locator):
-        if self._active_buffers[locator]:
-            return self._active_buffers[locator]
+        existing_buffer = super(LMDBBlockStore, self).get(locator)
+        if existing_buffer is not None:
+            return existing_buffer
 
         with self._database.begin(buffers=True) as transaction:
             content = transaction.get(locator)
-        self._active_buffers[locator] = LMDBBlockStore._TrackedBuffer(content)
+
+        if content is None:
+            return None
+        return super(LMDBBlockStore, self).track(locator, content)
 
     def put(self, locator, content):
         with self._database.begin(write=True) as transaction:
             transaction.put(locator, content)
-        active_buffer = self._active_buffers.get(locator)
-
-        if active_buffer is not None and active_buffer.valid:
-            # Content overwritten - reload buffer
-            active_buffer.underlying_buffer = self.get(locator)
+        super(LMDBBlockStore, self).put(locator, content)
 
     def delete(self, locator):
-        active_buffer = self._active_buffers.get(locator)
-        if active_buffer is not None and active_buffer.valid:
-            # Invalid existing buffer so that old copy can be cleaned up
-            active_buffer.invalidate()
-
+        super(LMDBBlockStore, self).delete(locator)
         with self._database.begin(write=True) as transaction:
             return transaction.delete(locator)
 
@@ -202,7 +284,8 @@ class LMDBBlockStore(BlockStore):
         size = len(content)
         page_size = self._get_page_size()
         max_key_size = self._database.max_key_size()
-        return int(ceil(float(LMDBBlockStore._HEADER_SIZE + max_key_size + size) / float(page_size)) * page_size)
+        return int(ceil(float(LMDBBlockStore._HEADER_SIZE + max_key_size + size)
+                        / float(page_size)) * page_size)
 
     def calculate_usuable_size(self):
         """
