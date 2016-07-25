@@ -170,26 +170,19 @@ class BufferedBlockStore(BlockStore):
             # Throw away reference to underlying buffer to close it
             self.underlying_buffer = None
 
-        def __getitem__(self, index):
+        def __getattr__( self, name):
+            # Used to make this object act in the same way as the underlying buffer
             if not self._valid:
-                raise IOError("The buffer cannot be read as it has been invalidated")
-            return self.underlying_buffer[index]
-
-        # TODO: Change to use to make this class as close to the buffer class as possible
-        # def __getattr__( self, name):
-
-        def __len__(self):
-            return len(self.underlying_buffer)
-
-        def __str__(self):
-            return str(self.underlying_buffer)
+                raise IOError("The buffer cannot be used as it has been invalidated")
+            assert self.underlying_buffer is not None
+            return self.underlying_buffer.__getattribute__(name)
 
         def __eq__(self, other):
             if isinstance(other, type(self)):
                 return other.underlying_buffer == self.underlying_buffer \
                        and other.valid == self.valid
             if isinstance(other, bytearray):
-                # TODO: Loss of symmetric equality...
+                # XXX: Loss of symmetric equality :(
                 return other == self.underlying_buffer
             return False
 
