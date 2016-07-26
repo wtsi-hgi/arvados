@@ -10,7 +10,7 @@ from arvados.keepcache.block_store import LMDBBlockStore, InMemoryBlockStore, \
 from arvados.keepcache.block_store_bookkeepers import \
     InMemoryBlockStoreBookkeeper, BlockGetRecord, BlockPutRecord, \
     BlockDeleteRecord
-from tests.keepcache._common import CONTENTS, CACHE_SIZE, LOCATOR_1
+from tests.keepcache._common import CONTENTS, CACHE_SIZE, LOCATOR_1, LOCATOR_2
 
 
 class _LazyCalculatedDict(UserDict):
@@ -82,6 +82,14 @@ class TestBlockStore(unittest.TestCase):
         contents = bytearray(actual_size)
         self.block_store.put(LOCATOR_1, contents)
         self.assertEqual(contents, self.block_store.get(LOCATOR_1))
+
+    def test_put_copy_from_get(self):
+        self.block_store.put(LOCATOR_1, CONTENTS)
+        contents = self.block_store.get(LOCATOR_1)
+        assert self.block_store.get(LOCATOR_2) is None
+        self.block_store.put(LOCATOR_2, contents)
+        self.assertEqual(CONTENTS, self.block_store.get(LOCATOR_1))
+        self.assertEqual(CONTENTS, self.block_store.get(LOCATOR_2))
 
     def test_delete_when_not_put(self):
         deleted = self.block_store.delete(LOCATOR_1)

@@ -154,6 +154,8 @@ class OpenTransactionBuffer(object):
     """
     Buffer that can only be read from whilst a transaction is open.
     """
+    _NO_LONGER_VALID_ERROR = IOError("The buffer is no longer accessible")
+
     def __init__(self, locator, database):
         """
         Constructor.
@@ -194,8 +196,15 @@ class OpenTransactionBuffer(object):
             return other == self._buffer
 
     def __iter__(self):
-        # FIXME: Buffer may become invalid part-way though iteration!
-        return iter(self._buffer)
+        with self._read_block_control:
+            self._open_transaction()
+            # FIXME: Buffer may become invalid part-way though iteration!
+            return iter(self._buffer)
+
+    def __str__(self):
+        with self._read_block_control:
+            self._open_transaction()
+            return str(self._buffer)
 
     def pause(self):
         """
@@ -277,7 +286,7 @@ class OpenTransactionBuffer(object):
                     self._transaction = self._database.begin(buffers=True)
                     self._buffer = self._transaction.get(self.locator)
                     if self._buffer is None:
-                        raise IOError("The buffer is no longer accessible")
+                        raise OpenTransactionBuffer._NO_LONGER_VALID_ERROR
 
 
 class LMDBBlockStore(BlockStore):
