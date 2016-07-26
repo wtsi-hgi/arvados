@@ -3,7 +3,7 @@ from abc import ABCMeta, abstractmethod
 from base64 import urlsafe_b64encode
 from collections import defaultdict
 from math import ceil
-from threading import Thread, Event
+from threading import Thread, Event, Lock, Semaphore, Condition
 from weakref import WeakValueDictionary
 
 import lmdb
@@ -126,106 +126,143 @@ class DiskOnlyBlockStore(BlockStore):
         return os.path.join(self._directory, locator)
 
 
-class BufferedBlockStore(BlockStore):
+class BlockControl(object):
     """
-    Block store that returns buffers to data.
+    TODO
     """
-    __metaclass__ = ABCMeta
-
-    class TrackedBuffer():
-        """
-        A (pseudo) buffer, which can be invalidated and modified "remotely".
-        """
-        def __init__(self, underlying_buffer):
-            """
-            Constructor.
-            :param underlying_buffer: the underlying, actual buffer
-            :type underlying_buffer: buffer
-            """
-            self.underlying_buffer = None
-            self._valid = False
-            self.set(underlying_buffer)
-
-        @property
-        def valid(self):
-            """
-            Whether the buffer is still valid.
-            :return: the validity of the buffer
-            :rtype: bool
-            """
-            return self._valid
-
-        def set(self, underlying_buffer):
-            """
-            Sets the underlying buffer, setting it to valid.
-            :param underlying_buffer: the underlying buffer
-            """
-            self.underlying_buffer = underlying_buffer
-            self._valid = True
-
-        def invalidate(self):
-            """
-            Invalidates the buffer.
-            """
-            self._valid = False
-            # Throw away reference to underlying buffer to close it
-            self.underlying_buffer = None
-
-        def __getattr__( self, name):
-            # Used to make this object act in the same way as the underlying buffer
-            if not self._valid:
-                raise IOError("The buffer cannot be used as it has been invalidated")
-            assert self.underlying_buffer is not None
-            return self.underlying_buffer.__getattribute__(name)
-
-        def __eq__(self, other):
-            if isinstance(other, type(self)):
-                return other.underlying_buffer == self.underlying_buffer \
-                       and other.valid == self.valid
-            # XXX: Loss of symmetric equality :(
-            return other == self.underlying_buffer
-
     def __init__(self):
+        self.counter = 0
+        self.condition = Condition()
+        self.entry_allowed = Event()
+        self.entry_allowed.set()
+
+    def __enter__(self):
+        if not self.entry_allowed.is_set():
+            # Prevent entry into block until allowed again
+            self.entry_allowed.wait()
+        with self.condition:
+            self.counter += 1
+
+    def __exit__(self, *args, **kwargs):
+        with self.condition:
+            self.counter -= 1
+            self.condition.notify_all()
+
+
+class OpenTransactionBuffer(object):
+    """
+    Buffer that can only be read from whilst a transaction is open.
+    """
+    def __init__(self, locator, database):
         """
         Constructor.
-        """
-        self._active_buffers = WeakValueDictionary()  # type: Dict[str, BufferedBlockStore.TrackedBuffer]
-
-    def get(self, locator):
-        active_buffer = self._active_buffers.get(locator, None)
-        return active_buffer if active_buffer is not None and active_buffer.valid else None
-
-    def put(self, locator, content):
-        active_buffer = self._active_buffers.get(locator)
-        if active_buffer is not None:
-            if active_buffer.underlying_buffer != content:
-                # Content overwritten - reload buffer
-                active_buffer.set(content)
-        else:
-            self.track(locator, content)
-
-    def delete(self, locator):
-        active_buffer = self._active_buffers.get(locator)
-        if active_buffer is not None and active_buffer.valid:
-            # Invalid existing buffer so that old copy can be cleaned up
-            active_buffer.invalidate()
-
-    def track(self, locator, content):
-        """
-        Tracks pointers to the content associated to the given locator.
-        :param locator: the content's locator
+        :param locator: locator holding the buffer
         :type locator: str
-        :param content: the content to track
-        :type content: buffer
-        :return: the content in a form that can be tracked
-        :rtype: BufferedBlockStore.TrackedBuffer
+        :param database: LMBD database (TODO: refactor to make generic)
         """
-        tracked_content = BufferedBlockStore.TrackedBuffer(content)
-        self._active_buffers[locator] = tracked_content
-        return tracked_content
+        self.locator = locator
+        self._database = database
+        self._transaction = None
+        self._buffer = None
+        self._read_block_control = BlockControl()
+        self._close_transaction_lock = Lock()
+        self._close_counter = 0
+        self._open_transaction_lock = Lock()
+        self._stop_read_lock = Lock()
+
+    def __del__(self):
+        if self._has_open_transaction():
+            self.close_transaction()
+
+    def __getitem__(self, index):
+        with self._read_block_control:
+            self._open_transaction()
+            return self._buffer[index]
+
+    def __len__(self):
+        with self._read_block_control:
+            self._open_transaction()
+            return len(self._buffer)
+
+    def __eq__(self, other):
+        with self._read_block_control:
+            self._open_transaction()
+            if isinstance(other, type(self)):
+                return other._buffer == self._buffer
+            # XXX: Loss of symmetric equality :(
+            return other == self._buffer
+
+    def pause(self):
+        """
+        Pauses ability to read from the buffer.
+        """
+        with self._stop_read_lock:
+            self._read_block_control.entry_allowed.clear()
+
+    def resume(self):
+        """
+        Resumes ability to read from the buffer.
+        """
+        with self._stop_read_lock:
+            self._read_block_control.entry_allowed.set()
+
+    def close_transaction(self):
+        """
+        Closes the transaction through which the buffer data is accessed.
+        """
+        # Copy value of close counter
+        closed = self._close_counter
+
+        with self._stop_read_lock:
+            with self._close_transaction_lock:
+                if self._close_counter == closed:
+                    # Transaction was not already closed whilst waiting for lock
+                    assert self._transaction is not None
+
+                    # Prevent addition reads from the buffer
+                    self._read_block_control.entry_allowed.clear()
+
+                    # Waits for all buffer reads to finish
+                    while True:
+                        self._read_block_control.condition.acquire()
+                        if self._read_block_control.counter == 0:
+                            break
+                        self._read_block_control.condition.release()
+                        # Wait for another reader to complete
+                        self._read_block_control.condition.wait()
+
+                    self._transaction.abort()
+                    self._transaction = None
+                    self._read_block_control.entry_allowed.set()
+                    self._read_block_control.condition.release()
+                    self._close_counter += 1
+
+    def _has_open_transaction(self):
+        """
+        Whether the transaction is open.
+        :return: whether the transaction is open
+        :rtype: bool
+        """
+        return self._transaction is not None
+
+    def _open_transaction(self):
+        """
+        Opens the transaction required to read from the buffer.
+        """
+        if not self._has_open_transaction():
+            with self._open_transaction_lock:
+                # Ensures transaction not opened whilst waiting for lock
+                if not self._has_open_transaction():
+                    assert self._transaction is None
+                    assert self._buffer is None
+                    # TODO: Make transaction open generic
+                    self._transaction = self._database.begin(buffers=True)
+                    self._buffer = self._transaction.get(self.locator)
+                    if self._buffer is None:
+                        raise IOError("The buffer is no longer accessible")
 
 
-class LMDBBlockStore(BufferedBlockStore):
+class LMDBBlockStore(BlockStore):
     """
     Block store backed by Lightning Memory-Mapped Database (LMDB).
     """
@@ -244,46 +281,40 @@ class LMDBBlockStore(BufferedBlockStore):
         super(LMDBBlockStore, self).__init__()
         self._database = lmdb.open(directory, writemap=True, map_size=map_size)
         self._map_size = map_size
-        self._readers = set()   # type: Set[Thread]
+        self._buffers = set()   # type: Set[OpenTransactionBuffer]
+        self._database_lock = Lock()
 
     def get(self, locator):
-        existing_buffer = super(LMDBBlockStore, self).get(locator)
-        if existing_buffer is not None:
-            return existing_buffer
-
-        read_event = Event()
-        content = []
-
-        def read():
+        # Need to prevent use whilst writing
+        with self._database_lock:
             with self._database.begin(buffers=True) as transaction:
-                # Strange use of list instead of `nonlocal` due to use of
-                # version of Python that was outmoded in 2008...
-                # http://stackoverflow.com/questions/3190706/nonlocal-keyword-in-python-2-x
-                content.append(transaction.get(locator))
-            read_event.set()
+                if transaction.get(locator) is None:
+                    return None
 
-        reader = Thread(target=read)
-        self._readers.add(reader)
-        reader.start()
-        read_event.wait()
-        self._readers.remove(reader)
-
-        if len(content) == 0 or content[0] is None:
-            return None
-        else:
-            assert len(content) == 1
-            content = content[0]
-        return super(LMDBBlockStore, self).track(locator, content)
+            content_buffer = OpenTransactionBuffer(locator, self._database)
+            self._buffers.add(content_buffer)
+            return content_buffer
 
     def put(self, locator, content):
-        with self._database.begin(write=True) as transaction:
-            transaction.put(locator, content)
-        super(LMDBBlockStore, self).put(locator, content)
+        # Need to prevent new buffers being acquired via `get`
+        with self._database_lock:
+            # Pause and close any buffers to the content that is about to be
+            # overwritten
+            self._pause_and_close_buffers(locator)
+            with self._database.begin(write=True) as transaction:
+                transaction.put(locator, content)
+            self._resume_buffers(locator)
 
     def delete(self, locator):
-        super(LMDBBlockStore, self).delete(locator)
-        with self._database.begin(write=True) as transaction:
-            return transaction.delete(locator)
+        # Need to prevent new buffers being acquired via `get`
+        with self._database_lock:
+            # Pause and close all buffers so the deleted entry is not maintained
+            # in snapshot held by reader transaction
+            self._pause_and_close_buffers()
+            with self._database.begin(write=True) as transaction:
+                deleted = transaction.delete(locator)
+            self._resume_buffers()
+            return deleted
 
     def calculate_stored_size(self, content):
         # Note: if max_key_size + size <= 2040, LMDB will store multiple entries
@@ -316,6 +347,27 @@ class LMDBBlockStore(BufferedBlockStore):
         :rtype: int
         """
         return self._database.stat()["psize"]
+
+    def _pause_and_close_buffers(self, locator=None):
+        """
+        Pauses and then closes buffers.
+        :param locator: optionally only closes buffers with the given locator
+        :type locator: Optional[str]
+        """
+        for open_transaction_buffer in self._buffers:
+            if locator is None or open_transaction_buffer.locator == locator:
+                open_transaction_buffer.pause()
+                open_transaction_buffer.close_transaction()
+
+    def _resume_buffers(self, locator=None):
+        """
+        Resumes the buffers.
+        :param locator: optionally only resumes buffers with the given locator
+        :type locator: Optional[str]
+        """
+        for open_transaction_buffer in self._buffers:
+            if locator is None or open_transaction_buffer.locator == locator:
+                open_transaction_buffer.resume()
 
 
 class RocksDBBlockStore(BlockStore):
