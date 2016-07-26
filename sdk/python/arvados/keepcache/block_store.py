@@ -228,39 +228,38 @@ class OpenTransactionBuffer(object):
         """
         Closes the transaction through which the buffer data is accessed.
         """
-        # Copy value of close counter
-        closed = self._close_counter
+        if self._has_open_transaction():
+            # Copy value of close counter
+            closed = self._close_counter
 
-        with self._stop_read_lock:
-            with self._close_transaction_lock:
-                if self._close_counter == closed:
-                    # Transaction was not already closed whilst waiting for lock
-                    assert self._transaction is not None
+            with self._stop_read_lock:
+                with self._close_transaction_lock:
+                    # Ensures transaction was not already closed whilst waiting for lock
+                    if self._close_counter == closed:
+                        # Prevent addition reads from the buffer
+                        self._read_block_control.entry_allowed.clear()
 
-                    # Prevent addition reads from the buffer
-                    self._read_block_control.entry_allowed.clear()
+                        # Waits for all buffer reads to finish
+                        while True:
+                            self._read_block_control.condition.acquire()
+                            if self._read_block_control.counter == 0:
+                                break
+                            self._read_block_control.condition.release()
+                            logger.debug(
+                                "Waiting for %d reader(s) of buffer associated to "
+                                "`%s` to finish before transaction is closed"
+                                % (self._read_block_control.counter, self.locator))
+                            # Wait for another reader to complete
+                            self._read_block_control.condition.wait()
 
-                    # Waits for all buffer reads to finish
-                    while True:
-                        self._read_block_control.condition.acquire()
-                        if self._read_block_control.counter == 0:
-                            break
+                        logger.info(
+                            "Closing transaction for buffer associated to `%s`"
+                            % self.locator)
+                        self._transaction.abort()
+                        self._transaction = None
+                        self._read_block_control.entry_allowed.set()
                         self._read_block_control.condition.release()
-                        logger.debug(
-                            "Waiting for %d reader(s) of buffer associated to "
-                            "`%s` to finish before transaction is closed"
-                            % (self._read_block_control.counter, self.locator))
-                        # Wait for another reader to complete
-                        self._read_block_control.condition.wait()
-
-                    logger.info(
-                        "Closing transaction for buffer associated to `%s`"
-                        % self.locator)
-                    self._transaction.abort()
-                    self._transaction = None
-                    self._read_block_control.entry_allowed.set()
-                    self._read_block_control.condition.release()
-                    self._close_counter += 1
+                        self._close_counter += 1
 
     def _has_open_transaction(self):
         """
@@ -281,7 +280,6 @@ class OpenTransactionBuffer(object):
                     logger.info("Opening transaction for buffer associated to "
                                 "`%s`" % self.locator)
                     assert self._transaction is None
-                    assert self._buffer is None
                     # TODO: Make transaction open generic
                     self._transaction = self._database.begin(buffers=True)
                     self._buffer = self._transaction.get(self.locator)
