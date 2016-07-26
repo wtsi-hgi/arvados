@@ -103,15 +103,9 @@ class TestKeepBlockCacheWithBlockStore(TestKeepBlockCache):
         self.cache.block_store.put(LOCATOR_1, CONTENTS)
         self.assertEqual(CONTENTS, self.cache.get(LOCATOR_1).content)
 
-
     def test_set_content_to_more_than_max_size(self):
         slot, _ = self.cache.reserve_cache(LOCATOR_1)
         self.assertRaises(ValueError, slot.set, bytearray(CACHE_SIZE + 1))
-
-    def test_create_cache_slot_when_reference_exists(self):
-        slot_1 = self.cache.create_cache_slot(LOCATOR_1, CONTENTS)
-        slot_2 = self.cache.create_cache_slot(LOCATOR_1, bytearray(0))
-        self.assertEqual(id(slot_1), id(slot_2))
 
     def test_concurrent_set_for_same_locator(self):
         puts = []

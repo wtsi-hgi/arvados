@@ -174,14 +174,17 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
             if content is None:
                 return None
             else:
-                return self.create_cache_slot(locator, content)
+                slot = self._create_cache_slot(locator)
+                if content is not None and slot.content != content:
+                    slot.set(content)
+                return slot
 
     def reserve_cache(self, locator):
         slot = self.get(locator)
         if slot is not None:
             return slot, False
         else:
-            return self.create_cache_slot(locator), True
+            return self._create_cache_slot(locator), True
 
     def cap_cache(self):
         # Given that the cache in this implementation does not grow beyond its
@@ -189,33 +192,23 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         # should be a no-op.
         assert self.block_store.bookkeeper.get_active_storage_size() <= self.cache_max
 
-    def create_cache_slot(self, locator, content=None):
+    def _create_cache_slot(self, locator):
         """
-        Creates a cache slot for the given locator and sets its contents if
-        given.
+        Creates a cache slot for the given locator.
 
         If a reference already exists to a model of the required cache slot,
         that pre-existing slot is returned.
         :param locator: the slot identifier
         :type locator: str
         :param content: optional contents that the cache slot should hold
-        :type content: Optional[bytearray]
-        :return: the cache slot
         """
-        self._referenced_cache_slots_lock.acquire()
-        slot = self._referenced_cache_slots.get(locator, None)
-        if slot is not None:
-            self._referenced_cache_slots_lock.release()
-            if content is not None and slot.content != content:
-                slot.set(content)
-            return slot
-        else:
-            slot = GetterSetterCacheSlot(locator, self._get_content,
-                                         self._set_content)
+        with self._referenced_cache_slots_lock:
+            slot = self._referenced_cache_slots.get(locator, None)
+            if slot is not None:
+                return slot
+            slot = GetterSetterCacheSlot(
+                locator, self._get_content, self._set_content)
             self._referenced_cache_slots[locator] = slot
-            self._referenced_cache_slots_lock.release()
-            if content is not None:
-                slot.set(content)
             return slot
 
     def _get_content(self, locator):
