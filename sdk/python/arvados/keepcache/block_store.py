@@ -1,13 +1,14 @@
+import logging
 import os
 from abc import ABCMeta, abstractmethod
 from base64 import urlsafe_b64encode
-from collections import defaultdict
 from math import ceil
-from threading import Thread, Event, Lock, Semaphore, Condition
-from weakref import WeakValueDictionary
+from threading import Event, Lock, Condition
 
 import lmdb
 import rocksdb
+
+logger = logging.getLogger(__name__)
 
 
 class BlockStore(object):
@@ -192,11 +193,17 @@ class OpenTransactionBuffer(object):
             # XXX: Loss of symmetric equality :(
             return other == self._buffer
 
+    def __iter__(self):
+        # FIXME: Buffer may become invalid part-way though iteration!
+        return iter(self._buffer)
+
     def pause(self):
         """
         Pauses ability to read from the buffer.
         """
         with self._stop_read_lock:
+            logger.debug(
+                "Pausing access to buffer associated to `%s`" % self.locator)
             self._read_block_control.entry_allowed.clear()
 
     def resume(self):
@@ -204,6 +211,8 @@ class OpenTransactionBuffer(object):
         Resumes ability to read from the buffer.
         """
         with self._stop_read_lock:
+            logger.debug(
+                "Resuming access to buffer associated to `%s`" % self.locator)
             self._read_block_control.entry_allowed.set()
 
     def close_transaction(self):
@@ -228,9 +237,16 @@ class OpenTransactionBuffer(object):
                         if self._read_block_control.counter == 0:
                             break
                         self._read_block_control.condition.release()
+                        logger.debug(
+                            "Waiting for %d reader(s) of buffer associated to "
+                            "`%s` to finish before transaction is closed"
+                            % (self._read_block_control.counter, self.locator))
                         # Wait for another reader to complete
                         self._read_block_control.condition.wait()
 
+                    logger.info(
+                        "Closing transaction for buffer associated to `%s`"
+                        % self.locator)
                     self._transaction.abort()
                     self._transaction = None
                     self._read_block_control.entry_allowed.set()
@@ -253,6 +269,8 @@ class OpenTransactionBuffer(object):
             with self._open_transaction_lock:
                 # Ensures transaction not opened whilst waiting for lock
                 if not self._has_open_transaction():
+                    logger.info("Opening transaction for buffer associated to "
+                                "`%s`" % self.locator)
                     assert self._transaction is None
                     assert self._buffer is None
                     # TODO: Make transaction open generic
@@ -287,6 +305,7 @@ class LMDBBlockStore(BlockStore):
     def get(self, locator):
         # Need to prevent use whilst writing
         with self._database_lock:
+            logger.info("Getting value for `%s`" % locator)
             with self._database.begin(buffers=True) as transaction:
                 if transaction.get(locator) is None:
                     return None
@@ -296,10 +315,14 @@ class LMDBBlockStore(BlockStore):
             return content_buffer
 
     def put(self, locator, content):
+        if not isinstance(content, bytearray):
+            content = bytearray(content)
+
         # Need to prevent new buffers being acquired via `get`
         with self._database_lock:
             # Pause and close any buffers to the content that is about to be
             # overwritten
+            logger.info("Putting value for `%s`" % locator)
             self._pause_and_close_buffers(locator)
             with self._database.begin(write=True) as transaction:
                 transaction.put(locator, content)
@@ -310,6 +333,7 @@ class LMDBBlockStore(BlockStore):
         with self._database_lock:
             # Pause and close all buffers so the deleted entry is not maintained
             # in snapshot held by reader transaction
+            logger.info("Deleting value for `%s`" % locator)
             self._pause_and_close_buffers()
             with self._database.begin(write=True) as transaction:
                 deleted = transaction.delete(locator)
