@@ -306,19 +306,23 @@ class LMDBBlockStore(BlockStore):
         super(LMDBBlockStore, self).__init__()
         self._database = lmdb.open(directory, writemap=True, map_size=map_size)
         self._map_size = map_size
-        self._buffers = set()   # type: Set[OpenTransactionBuffer]
+        self._buffers = dict()   # type: Dict[str, OpenTransactionBuffer]
         self._database_lock = Lock()
 
     def get(self, locator):
+        if locator in self._buffers:
+            return self._buffers[locator]
+
         # Need to prevent use whilst writing
         with self._database_lock:
             logger.info("Getting value for `%s`" % locator)
+            # TODO: Better way of checking if exists in database?
             with self._database.begin(buffers=True) as transaction:
                 if transaction.get(locator) is None:
                     return None
 
             content_buffer = OpenTransactionBuffer(locator, self._database)
-            self._buffers.add(content_buffer)
+            self._buffers[locator] = content_buffer
             return content_buffer
 
     def put(self, locator, content):
@@ -338,13 +342,23 @@ class LMDBBlockStore(BlockStore):
     def delete(self, locator):
         # Need to prevent new buffers being acquired via `get`
         with self._database_lock:
+            logger.info("Deleting value for `%s`" % locator)
             # Pause and close all buffers so the deleted entry is not maintained
             # in snapshot held by reader transaction
-            logger.info("Deleting value for `%s`" % locator)
             self._pause_and_close_buffers()
+
+            # Delete from database
             with self._database.begin(write=True) as transaction:
                 deleted = transaction.delete(locator)
+
+            # Resume buffers as transaction is complete
             self._resume_buffers()
+
+            if locator in self._buffers:
+                # Dereference existing buffers for locator, which will now be
+                # invalid
+                del self._buffers[locator]
+
             return deleted
 
     def calculate_stored_size(self, content):
@@ -385,7 +399,7 @@ class LMDBBlockStore(BlockStore):
         :param locator: optionally only closes buffers with the given locator
         :type locator: Optional[str]
         """
-        for open_transaction_buffer in self._buffers:
+        for open_transaction_buffer in self._buffers.values():
             if locator is None or open_transaction_buffer.locator == locator:
                 open_transaction_buffer.pause()
                 open_transaction_buffer.close_transaction()
@@ -396,7 +410,7 @@ class LMDBBlockStore(BlockStore):
         :param locator: optionally only resumes buffers with the given locator
         :type locator: Optional[str]
         """
-        for open_transaction_buffer in self._buffers:
+        for open_transaction_buffer in self._buffers.values():
             if locator is None or open_transaction_buffer.locator == locator:
                 open_transaction_buffer.resume()
 
