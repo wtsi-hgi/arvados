@@ -52,6 +52,7 @@ class LastUsedReplacementPolicy(CacheReplacementPolicy):
         get_records = bookkeeper.get_all_get_records(
             locators=[record.locator for record in active_put_records],
             since=oldest_timestamp)
+        assert isinstance(get_records, set)
 
         records = dict()    # type: Dict[str, Record]
         for record in active_put_records | get_records:

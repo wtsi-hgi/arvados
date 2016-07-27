@@ -210,8 +210,8 @@ class InMemoryBlockStoreBookkeeper(BlockStoreBookkeeper):
     class InMemoryBlockPutRecord(InMemoryBlockRecord, BlockPutRecord):
         """In memory block put record."""
         def __init__(self, locator, timestamp, size):
-            super(InMemoryBlockStoreBookkeeper.InMemoryBlockPutRecord, self).__init__(
-                locator, timestamp)
+            super(InMemoryBlockStoreBookkeeper.InMemoryBlockPutRecord, self).\
+                __init__(locator, timestamp)
             self._size = size
 
         @property
@@ -260,7 +260,8 @@ class InMemoryBlockStoreBookkeeper(BlockStoreBookkeeper):
         self._records[BlockDeleteRecord].add(record)
 
     def _get_all_records_of_type(self, record_type, locators, since):
-        records = self._records[record_type]
+        # Note: copy of set used to prevent changes during use
+        records = set(self._records[record_type])
         if locators is not None:
             records = {record for record in records if record.locator in locators}
         if since is not None:
