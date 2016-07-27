@@ -3,7 +3,7 @@ import os
 from abc import ABCMeta, abstractmethod
 from base64 import urlsafe_b64encode
 from math import ceil
-from threading import Event, Lock, Condition
+from threading import Event, Lock, Condition, RLock
 
 import lmdb
 import rocksdb
@@ -156,15 +156,18 @@ class OpenTransactionBuffer(object):
     """
     _NO_LONGER_VALID_ERROR = IOError("The buffer is no longer accessible")
 
-    def __init__(self, locator, database):
+    def __init__(self, locator, transaction_opener, transaction_closer):
         """
         Constructor.
         :param locator: locator holding the buffer
         :type locator: str
-        :param database: LMBD database (TODO: refactor to make generic)
+        TODO: Document undocumented parameters
+        TODO: Note that transaction opener must return object with `get` method
+        that gets the raw buffer
         """
         self.locator = locator
-        self._database = database
+        self._transaction_opener = transaction_opener
+        self._transaction_closer = transaction_closer
         self._transaction = None
         self._buffer = None
         self._read_block_control = BlockControl()
@@ -255,7 +258,7 @@ class OpenTransactionBuffer(object):
                         logger.info(
                             "Closing transaction for buffer associated to `%s`"
                             % self.locator)
-                        self._transaction.abort()
+                        self._transaction_closer(self._transaction)
                         self._transaction = None
                         self._read_block_control.entry_allowed.set()
                         self._read_block_control.condition.release()
@@ -280,8 +283,7 @@ class OpenTransactionBuffer(object):
                     logger.info("Opening transaction for buffer associated to "
                                 "`%s`" % self.locator)
                     assert self._transaction is None
-                    # TODO: Make transaction open generic
-                    self._transaction = self._database.begin(buffers=True)
+                    self._transaction = self._transaction_opener()
                     self._buffer = self._transaction.get(self.locator)
                     if self._buffer is None:
                         raise OpenTransactionBuffer._NO_LONGER_VALID_ERROR
@@ -293,7 +295,7 @@ class LMDBBlockStore(BlockStore):
     """
     _HEADER_SIZE = 16
 
-    def __init__(self, directory, map_size):
+    def __init__(self, directory, map_size, max_readers):
         """
         Constructor.
         :param directory: the directory to use for the database (will create if
@@ -302,12 +304,18 @@ class LMDBBlockStore(BlockStore):
         :type directory: str
         :param map_size: maximum size that the database can grow to in bytes
         :type map_size: int
+        :param max_readers: the maximum number of readers
+        :type max_readers: int
         """
         super(LMDBBlockStore, self).__init__()
-        self._database = lmdb.open(directory, writemap=True, map_size=map_size)
+        self._database = lmdb.open(directory, writemap=True, map_size=map_size,
+                                   max_readers=max_readers)
         self._map_size = map_size
+        self._max_readers = max_readers
         self._buffers = dict()   # type: Dict[str, OpenTransactionBuffer]
         self._database_lock = Lock()
+        self._read_transaction_rlock = RLock()
+        self._reader_count = 0
 
     def get(self, locator):
         if locator in self._buffers:
@@ -316,12 +324,17 @@ class LMDBBlockStore(BlockStore):
         # Need to prevent use whilst writing
         with self._database_lock:
             logger.info("Getting value for `%s`" % locator)
-            # TODO: Better way of checking if exists in database?
-            with self._database.begin(buffers=True) as transaction:
-                if transaction.get(locator) is None:
-                    return None
 
-            content_buffer = OpenTransactionBuffer(locator, self._database)
+            # Checks if key exists - return `None` if it doesn't
+            transaction = self._open_read_transaction()
+            cursor = transaction.cursor()
+            key_found = cursor.set_key(locator)
+            transaction.abort()
+            if not key_found:
+                return None
+
+            content_buffer = OpenTransactionBuffer(
+                locator, self._open_read_transaction, self._close_read_transaction)
             self._buffers[locator] = content_buffer
             return content_buffer
 
@@ -347,7 +360,7 @@ class LMDBBlockStore(BlockStore):
             # in snapshot held by reader transaction
             self._pause_and_close_buffers()
 
-            # Delete from database
+            # Delete from LMDB database
             with self._database.begin(write=True) as transaction:
                 deleted = transaction.delete(locator)
 
@@ -413,6 +426,38 @@ class LMDBBlockStore(BlockStore):
         for open_transaction_buffer in self._buffers.values():
             if locator is None or open_transaction_buffer.locator == locator:
                 open_transaction_buffer.resume()
+
+    def _open_read_transaction(self):
+        """
+        Opens a read-only database transaction, dealing with limits on the
+        maximum number of readers.
+
+        Note: the max readers limit does not stop the opening of non-readonly
+        transactions.
+        :return: the opened transaction
+        :rtype: Transaction
+        """
+        with self._read_transaction_rlock:
+            if self._reader_count == self._max_readers:
+                # Max number of reader transactions - closing all
+                for open_transaction_buffer in self._buffers.values():
+                    open_transaction_buffer.close_transaction()
+                self._reader_count = 0
+
+            self._reader_count += 1
+            assert self._reader_count <= self._max_readers
+            return self._database.begin(buffers=True)
+
+    def _close_read_transaction(self, transaction):
+        """
+        Closes a read-only database transaction.
+        :param transaction: the read-only transaction to be closed
+        :type Transaction
+        """
+        with self._read_transaction_rlock:
+            transaction.abort()
+            self._reader_count -= 1
+            assert self._reader_count >= 0
 
 
 class RocksDBBlockStore(BlockStore):

@@ -148,9 +148,12 @@ class TestLMDBBlockStore(TestBlockStore):
     """
     Tests for `LMDBBlockStore`.
     """
+    _MAX_READERS = 126
+
     def _create_block_store(self):
         temp_directory = self._create_temp_directory()
-        block_store = LMDBBlockStore(temp_directory, CACHE_SIZE)
+        block_store = LMDBBlockStore(
+            temp_directory, CACHE_SIZE, TestLMDBBlockStore._MAX_READERS)
         return block_store, block_store.calculate_usuable_size()
 
 
