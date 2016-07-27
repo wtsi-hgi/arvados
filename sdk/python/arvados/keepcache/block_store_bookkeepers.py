@@ -3,6 +3,7 @@ from collections import defaultdict
 from datetime import datetime
 
 from sqlalchemy import Column, String, Integer, create_engine, DateTime
+from sqlalchemy import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.sql import func
@@ -277,10 +278,19 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
     _SQLAlchemyModel = declarative_base()
 
     class _SqlAlchemyBlockRecord(_SQLAlchemyModel, BlockRecord):
+        class _Python2String(TypeDecorator):
+            impl = String
+
+            def process_result_value(self, value, dialect):
+                if isinstance(value, unicode):
+                    value = value.encode("utf-8")
+                    assert isinstance(value, str)
+                return value
+
         __abstract__ = True
         __tablename__ = BlockRecord.__name__
         id = Column(Integer, primary_key=True)
-        locator = Column(String)
+        locator = Column(_Python2String)
         timestamp = Column(DateTime)
 
     class _SqlAlchemyBlockPutRecord(_SqlAlchemyBlockRecord, BlockPutRecord):
