@@ -8,15 +8,17 @@ class CacheSlot(object):
     """
     __metaclass__ = ABCMeta
 
-    def __init__(self, locator):
+    def __init__(self, locator, content=None):
         """
         Constructor.
         :param locator: identifier
         :type locator: str
+        :param content: optional content already known
+        :type content: Optional[bytearray]
         """
         self.locator = locator
         self.ready = threading.Event()
-        self._content = None
+        self._content = content
 
     @property
     def content(self):
@@ -63,7 +65,7 @@ class GetterSetterCacheSlot(CacheSlot):
     Model of a slot in the cache where the contents of the slot are loaded and
     set using the given getter and setter methods.
     """
-    def __init__(self, locator, content_getter, content_setter):
+    def __init__(self, locator, content_getter, content_setter, content=None):
         """
         Constructor.
         :param locator: identifier
@@ -74,8 +76,10 @@ class GetterSetterCacheSlot(CacheSlot):
         :param content_setter: method that sets the contents associated to the
         given locator
         :type content_setter: Callable[[str, bytearray], None]
+        :param content: optional content already known
+        :type content: Optional[bytearray]
         """
-        super(GetterSetterCacheSlot, self).__init__(locator)
+        super(GetterSetterCacheSlot, self).__init__(locator, content)
         self._content_getter = content_getter
         self._content_setter = content_setter
 

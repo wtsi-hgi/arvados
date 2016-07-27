@@ -168,16 +168,16 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         # memory with multiple models of the same slot.
         slot = self._referenced_cache_slots.get(locator, None)
         if slot is not None:
+            # Slot already in memory
             return slot
         else:
             content = self.block_store.get(locator)
             if content is None:
+                # No contents to create slot with
                 return None
             else:
-                slot = self._create_cache_slot(locator)
-                if content is not None and slot.content != content:
-                    slot.set(content)
-                return slot
+                # Create slot object with contents
+                return self._create_cache_slot(locator, content)
 
     def reserve_cache(self, locator):
         slot = self.get(locator)
@@ -192,7 +192,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         # should be a no-op.
         assert self.block_store.bookkeeper.get_active_storage_size() <= self.cache_max
 
-    def _create_cache_slot(self, locator):
+    def _create_cache_slot(self, locator, content=None):
         """
         Creates a cache slot for the given locator.
 
@@ -200,14 +200,16 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         that pre-existing slot is returned.
         :param locator: the slot identifier
         :type locator: str
-        :param content: optional contents that the cache slot should hold
+        :param content: optional contents that are already known about the slot
+        :type content: bytearray
         """
         with self._referenced_cache_slots_lock:
             slot = self._referenced_cache_slots.get(locator, None)
             if slot is not None:
+                assert slot.content == content
                 return slot
             slot = GetterSetterCacheSlot(
-                locator, self._get_content, self._set_content)
+                locator, self._get_content, self._set_content, content=content)
             self._referenced_cache_slots[locator] = slot
             return slot
 
