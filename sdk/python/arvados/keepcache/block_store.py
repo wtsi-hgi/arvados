@@ -156,14 +156,38 @@ class OpenTransactionBuffer(object):
     """
     _NO_LONGER_VALID_ERROR = IOError("The buffer is no longer accessible")
 
+    class _BufferIterator(object):
+        """
+        Iterator for this type of buffer.
+        """
+        def __init__(self, open_transaction_buffer):
+            self._open_transaction_buffer = open_transaction_buffer
+            with self._open_transaction_buffer._read_block_control:
+                self._open_transaction_buffer._open_transaction()
+                self._buffer = self._open_transaction_buffer._buffer
+                self._buffer_iter = iter(self._buffer)
+
+        def next(self):
+            with self._open_transaction_buffer._read_block_control:
+                self._open_transaction_buffer._open_transaction()
+                current_buffer = self._open_transaction_buffer._buffer
+                if self._buffer != current_buffer:
+                    raise IOError("Buffer has changed midway through iteration")
+                return next(self._buffer_iter)
+
+        def __iter__(self):
+            return self
+
     def __init__(self, locator, transaction_opener, transaction_closer):
         """
         Constructor.
         :param locator: locator holding the buffer
         :type locator: str
-        TODO: Document undocumented parameters
-        TODO: Note that transaction opener must return object with `get` method
-        that gets the raw buffer
+        :param transaction_opener: opens the database transaction, returning
+        back on object through which raw data can be fetched by a `get` method
+        :type transaction_opener: callable
+        :param transaction_closer: closes a given database transaction
+        :type transaction_closer: callable
         """
         self.locator = locator
         self._transaction_opener = transaction_opener
@@ -199,10 +223,7 @@ class OpenTransactionBuffer(object):
             return other == self._buffer
 
     def __iter__(self):
-        with self._read_block_control:
-            self._open_transaction()
-            # FIXME: Buffer may become invalid part-way though iteration!
-            return iter(self._buffer)
+        return OpenTransactionBuffer._BufferIterator(self)
 
     def __str__(self):
         with self._read_block_control:
