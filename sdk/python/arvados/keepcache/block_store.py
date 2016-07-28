@@ -66,8 +66,9 @@ class InMemoryBlockStore(BlockStore):
     """
     Basic in-memory block store.
     """
+
     def __init__(self):
-        self._data = dict()     # type: Dict[str, bytearray]
+        self._data = dict()  # type: Dict[str, bytearray]
 
     def get(self, locator):
         return self._data.get(locator, None)
@@ -86,6 +87,7 @@ class DiskOnlyBlockStore(BlockStore):
     """
     Blocks store that writes blocks to disk without any fanciness.
     """
+
     def __init__(self, directory):
         """
         Constructor.
@@ -131,6 +133,7 @@ class BlockControl(object):
     """
     TODO
     """
+
     def __init__(self):
         self.counter = 0
         self.condition = Condition()
@@ -160,6 +163,7 @@ class OpenTransactionBuffer(object):
         """
         Iterator for this type of buffer.
         """
+
         def __init__(self, open_transaction_buffer):
             self._open_transaction_buffer = open_transaction_buffer
             with self._open_transaction_buffer._read_block_control:
@@ -272,7 +276,8 @@ class OpenTransactionBuffer(object):
                             logger.debug(
                                 "Waiting for %d reader(s) of buffer associated to "
                                 "`%s` to finish before transaction is closed"
-                                % (self._read_block_control.counter, self.locator))
+                                % (
+                                self._read_block_control.counter, self.locator))
                             # Wait for another reader to complete
                             self._read_block_control.condition.wait()
 
@@ -313,6 +318,32 @@ class OpenTransactionBuffer(object):
 class LMDBBlockStore(BlockStore):
     """
     Block store backed by Lightning Memory-Mapped Database (LMDB).
+
+    TLDR: LMDB does not like being a cache so has to be restrained with locks.
+    If you want to put 10GB of data in the block store, make LMDB 20GB.
+
+    LMDB uses the concept of Multi-Version Concurrency Control (MVCC) to reduce
+    its use of locks. When read transactions are started, they get a snapshot
+    view of the database, which is isolated against additional writes. The
+    consequence of this is that data is only purged when it no longer exists in
+    any snapshot; wedged read transactions can cause the database to get much
+    larger than naively expected.
+
+    LMDB requires its maximum size to be defined upon creation; if this size is
+    exceeded, an error will be raised. Unless the size of disk exceeds the total
+    size of all data that is going to be put in the cache (i.e. all data can fit
+    in the cache at the same time), users of LMDB have to worry about the total
+    size of the database. This will inevitably involve the use of locks, which
+    ultimately reverts the work of LMDB's creators to remove the need for locks.
+    (It suggests that LMDB is intended to be able to grow big enough to store
+    all data and is therefore a questionable choice for a cache...).
+
+    To add to the woes of using LMDB: in order to freely write and re-write
+    data, empirical evidence strongly suggests that only 50% of the size of an
+    LMDB database is usable in the worst case. This is not explained in any of
+    the documentation surrounding LMDB; instead the reason is obfuscated in the
+    10000+ lines of C that implement it:
+    https://github.com/LMDB/lmdb/blob/mdb.master/libraries/liblmdb/mdb.c.
     """
     _HEADER_SIZE = 16
 
@@ -333,7 +364,7 @@ class LMDBBlockStore(BlockStore):
                                    max_readers=max_readers)
         self._map_size = map_size
         self._max_readers = max_readers
-        self._buffers = dict()   # type: Dict[str, OpenTransactionBuffer]
+        self._buffers = dict()  # type: Dict[str, OpenTransactionBuffer]
         self._database_lock = Lock()
         self._read_transaction_rlock = RLock()
         self._reader_count = 0
@@ -355,7 +386,8 @@ class LMDBBlockStore(BlockStore):
                 return None
 
             content_buffer = OpenTransactionBuffer(
-                locator, self._open_read_transaction, self._close_read_transaction)
+                locator, self._open_read_transaction,
+                self._close_read_transaction)
             self._buffers[locator] = content_buffer
             return content_buffer
 
@@ -485,6 +517,7 @@ class RocksDBBlockStore(BlockStore):
     """
     Block store backed by RocksDB.
     """
+
     def __init__(self, directory, rocksdb_options=None):
         """
         Constructor.
@@ -526,6 +559,7 @@ class BookkeepingBlockStore(BlockStore):
     Block store that uses a bookkeeper to record accesses and modifications to
     entries in an underlying block store.
     """
+
     def __init__(self, block_store, bookkeeper):
         """
         Constructor.
