@@ -3,8 +3,8 @@ from collections import defaultdict
 from datetime import datetime
 from threading import Lock
 
-from sqlalchemy import Column, String, Integer, create_engine, DateTime
-from sqlalchemy import TypeDecorator
+from sqlalchemy import Column, String, Integer, create_engine, DateTime, \
+    TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.sql import func
@@ -327,37 +327,38 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
                 return record_type
         return None
 
-    def __init__(self, database_location):
+    def __init__(self, database_location, concurrent_write_supported=False):
         """
         Constructor.
         :param database_location: the location of the database
         :type database_location: str
+        :param concurrent_write_supported: whether the database supports
+        concurrent writes. SQLite does not support such writes
+        :type concurrent_write_supported: bool
         """
         self._engine = create_engine(database_location)
         SqlBlockStoreBookkeeper._SQLAlchemyModel.metadata.create_all(
             bind=self._engine)
-        # SQLlite is not thread-safe: it will raise a "database is locked" error
-        self._query_lock = Lock()
+        self._write_lock = Lock() if not concurrent_write_supported else None
 
     def get_active(self):
         PutRecord = SqlBlockStoreBookkeeper._SqlAlchemyBlockPutRecord
         DeleteRecord = SqlBlockStoreBookkeeper._SqlAlchemyBlockDeleteRecord
-        with self._query_lock:
-            session = self._create_session()
-            subquery = session.query(PutRecord, func.max(DeleteRecord.timestamp).label(
-                "latest_delete")). \
-                join(DeleteRecord, PutRecord.locator == DeleteRecord.locator). \
-                group_by(PutRecord.locator). \
-                subquery()
+        session = self._create_session()
+        subquery = session.query(PutRecord, func.max(DeleteRecord.timestamp).label(
+            "latest_delete")). \
+            join(DeleteRecord, PutRecord.locator == DeleteRecord.locator). \
+            group_by(PutRecord.locator). \
+            subquery()
 
-            query = session.query(PutRecord). \
-                outerjoin(subquery, subquery.c.locator == PutRecord.locator). \
-                filter(or_(
-                subquery.c.latest_delete == None,
-                PutRecord.timestamp > subquery.c.latest_delete
-            ))
-            results = query.all()
-            session.close()
+        query = session.query(PutRecord). \
+            outerjoin(subquery, subquery.c.locator == PutRecord.locator). \
+            filter(or_(
+            subquery.c.latest_delete == None,
+            PutRecord.timestamp > subquery.c.latest_delete
+        ))
+        results = query.all()
+        session.close()
         return set(results)
 
     def record_get(self, locator):
@@ -378,14 +379,13 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
 
     def _get_all_records_of_type(self, record_type, locators, since):
         sql_record_type = SqlBlockStoreBookkeeper._get_sql_record_type(record_type)
-        with self._query_lock:
-            session = self._create_session()
-            query = session.query(sql_record_type)
-            if locators is not None:
-                query = query.filter(sql_record_type.locator.in_(locators))
-            if since is not None:
-                query = query.filter(sql_record_type.timestamp >= since)
-            records = query.all()
+        session = self._create_session()
+        query = session.query(sql_record_type)
+        if locators is not None:
+            query = query.filter(sql_record_type.locator.in_(locators))
+        if since is not None:
+            query = query.filter(sql_record_type.timestamp >= since)
+        records = query.all()
         session.close()
         return set(records)
 
@@ -419,8 +419,11 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
         :param record: the record to store
         :type record: Record
         """
-        with self._query_lock:
-            session = self._create_session()
-            session.add(record)
-            session.commit()
-            session.close()
+        if self._write_lock is not None:
+            self._write_lock.acquire()
+        session = self._create_session()
+        session.add(record)
+        session.commit()
+        session.close()
+        if self._write_lock is not None:
+            self._write_lock.release()
