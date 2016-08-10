@@ -83,52 +83,6 @@ class InMemoryBlockStore(BlockStore):
         return True
 
 
-class DiskOnlyBlockStore(BlockStore):
-    """
-    Blocks store that writes blocks to disk without any fanciness.
-    """
-
-    def __init__(self, directory):
-        """
-        Constructor.
-        :param directory: the directory to write blocks to (will be created if
-        does not exist)
-        :type directory: str
-        """
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-        self._directory = directory
-
-    def get(self, locator):
-        path = self._get_path(locator)
-        if not os.access(path, os.R_OK):
-            return None
-        return open(path, "r").read()
-
-    def put(self, locator, content):
-        with open(self._get_path(locator), "w+") as file:
-            file.write(content)
-
-    def delete(self, locator):
-        path = self._get_path(locator)
-        if not os.access(path, os.R_OK):
-            return False
-        os.remove(path)
-        return True
-
-    def _get_path(self, locator):
-        """
-        Gets the path to the file related to the given locator.
-        :param locator: the locator
-        :type locator: str
-        :return: the file path
-        :rtype: str
-        """
-        # Translation from untrusted locator to safe file name
-        locator = urlsafe_b64encode(locator)
-        return os.path.join(self._directory, locator)
-
-
 class BlockControl(object):
     """
     TODO
@@ -347,22 +301,22 @@ class LMDBBlockStore(BlockStore):
     """
     _HEADER_SIZE = 16
 
-    def __init__(self, directory, map_size, max_readers):
+    def __init__(self, directory, max_size, max_readers):
         """
         Constructor.
         :param directory: the directory to use for the database (will create if
         does not already exist else will use pre-existing). This database must
         be used only by this store.
         :type directory: str
-        :param map_size: maximum size that the database can grow to in bytes
-        :type map_size: int
+        :param max_size: maximum size that the database can grow to in bytes
+        :type max_size: int
         :param max_readers: the maximum number of readers
         :type max_readers: int
         """
         super(LMDBBlockStore, self).__init__()
-        self._database = lmdb.open(directory, writemap=True, map_size=map_size,
+        self._database = lmdb.open(directory, writemap=True, map_size=max_size,
                                    max_readers=max_readers)
-        self._map_size = map_size
+        self._max_size = max_size
         self._max_readers = max_readers
         self._buffers = dict()  # type: Dict[str, OpenTransactionBuffer]
         self._database_lock = Lock()
@@ -447,8 +401,8 @@ class LMDBBlockStore(BlockStore):
         page_size = self._get_page_size()
         # Fixed cost (e.g. the pointer to the data root, free list root, etc)
         fixed_cost = 4 * page_size + LMDBBlockStore._HEADER_SIZE
-        size = self._map_size - fixed_cost
-        assert self._map_size >= size >= 0
+        size = self._max_size - fixed_cost
+        assert self._max_size >= size >= 0
         return size
 
     def _get_page_size(self):

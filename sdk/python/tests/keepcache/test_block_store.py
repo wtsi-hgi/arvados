@@ -133,17 +133,6 @@ class TestInMemoryBlockStore(TestBlockStore):
         return InMemoryBlockStore(), CACHE_SIZE
 
 
-class TestDiskOnlyBlockStore(TestBlockStore):
-    """
-    Tests for `DiskOnlyBlockStore`.
-    """
-
-    def _create_block_store(self):
-        temp_directory = self._create_temp_directory()
-        block_store = DiskOnlyBlockStore(temp_directory)
-        return block_store, CACHE_SIZE
-
-
 class TestLMDBBlockStore(TestBlockStore):
     """
     Tests for `LMDBBlockStore`.
