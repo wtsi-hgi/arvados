@@ -146,15 +146,6 @@ class TestLMDBBlockStore(TestBlockStore):
         return block_store, block_store.calculate_usuable_size()
 
 
-class TestRocksDBBlockStore(TestBlockStore):
-    """
-    Tests for `RocksDBBlockStore`.
-    """
-    def _create_block_store(self):
-        temp_directory = self._create_temp_directory()
-        return RocksDBBlockStore(temp_directory), CACHE_SIZE
-
-
 class TestBookkeepingBlockStore(TestBlockStore):
     """
     Tests for `BookkeepingBlockStore`.

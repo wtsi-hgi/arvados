@@ -1,12 +1,9 @@
 import logging
-import os
 from abc import ABCMeta, abstractmethod
-from base64 import urlsafe_b64encode
 from math import ceil
 from threading import Event, Lock, Condition, RLock
 
 import lmdb
-import rocksdb
 
 logger = logging.getLogger(__name__)
 
@@ -465,47 +462,6 @@ class LMDBBlockStore(BlockStore):
             transaction.abort()
             self._reader_count -= 1
             assert self._reader_count >= 0
-
-
-class RocksDBBlockStore(BlockStore):
-    """
-    Block store backed by RocksDB.
-    """
-
-    def __init__(self, directory, rocksdb_options=None):
-        """
-        Constructor.
-        :param directory: location used to store files related to the database
-        :type directory: str
-        :param rocksdb_options: options to use with RockDB database (defaults to
-        creating the database if missing)
-        :type rocksdb_options: rocksdb.Options
-        """
-        if rocksdb_options is None:
-            rocksdb_options = rocksdb.Options(create_if_missing=True)
-        self._database = rocksdb.DB(directory, rocksdb_options)
-
-    def get(self, locator):
-        content = self._database.get(locator)
-        if content is not None:
-            content = bytearray(content)
-        return content
-
-    def put(self, locator, content):
-        self._database.put(locator, bytes(content))
-
-    def delete(self, locator):
-        batch = rocksdb.WriteBatch()
-        existed = self._database.get(locator) is not None
-        self._database.delete(locator)
-        deleted = self._database.get(locator) is None
-        self._database.write(batch)
-        return existed and deleted
-
-    def calculate_stored_size(self, content):
-        # FIXME: This won't be accurate as there will be additional information
-        # stored.
-        return len(content)
 
 
 class BookkeepingBlockStore(BlockStore):
