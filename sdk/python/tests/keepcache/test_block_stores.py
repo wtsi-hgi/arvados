@@ -5,8 +5,7 @@ from abc import ABCMeta, abstractmethod
 from bisect import bisect_left
 from tempfile import mkdtemp
 
-from arvados.keepcache.block_store import LMDBBlockStore, InMemoryBlockStore, \
-    BookkeepingBlockStore, RocksDBBlockStore, DiskOnlyBlockStore
+from arvados.keepcache.block_stores import LMDBBlockStore, InMemoryBlockStore, BookkeepingBlockStore
 from arvados.keepcache.block_store_bookkeepers import \
     InMemoryBlockStoreBookkeeper, BlockGetRecord, BlockPutRecord, \
     BlockDeleteRecord

@@ -126,7 +126,7 @@ class InMemoryKeepBlockCache(KeepBlockCache):
                 return n, True
 
 
-class KeepBlockCacheWithBlockStore(KeepBlockCache):
+class BlockStoreBackedKeepBlockCache(KeepBlockCache):
     """
     Keep block cache backed by a block store, which can hold blocks in any way.
     """
@@ -141,7 +141,7 @@ class KeepBlockCacheWithBlockStore(KeepBlockCache):
         :param cache_replacement_policy: TODO
         :type cache_replacement_policy: CacheReplacementPolicy
         """
-        super(KeepBlockCacheWithBlockStore, self).__init__(cache_max)
+        super(BlockStoreBackedKeepBlockCache, self).__init__(cache_max)
         self._block_store = block_store
         self._cache_replacement_policy = cache_replacement_policy
         self._referenced_cache_slots = WeakValueDictionary()

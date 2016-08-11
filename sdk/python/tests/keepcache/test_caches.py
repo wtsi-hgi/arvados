@@ -6,17 +6,17 @@ from threading import Thread
 
 from mock import MagicMock
 
-from arvados.keepcache.block_store import BookkeepingBlockStore, \
+from arvados.keepcache.block_stores import BookkeepingBlockStore, \
     InMemoryBlockStore
 from arvados.keepcache.block_store_bookkeepers import \
     InMemoryBlockStoreBookkeeper
 from arvados.keepcache.caches import InMemoryKeepBlockCache, \
-    KeepBlockCacheWithBlockStore
+    BlockStoreBackedKeepBlockCache
 from arvados.keepcache.slots import CacheSlot
 from tests.keepcache._common import LOCATOR_1, CACHE_SIZE, CONTENTS, LOCATOR_2
 
 
-class TestKeepBlockCache(unittest.TestCase):
+class _TestKeepBlockCache(unittest.TestCase):
     """
     Unit tests for `KeepBlockCache`.
     """
@@ -79,7 +79,7 @@ class TestKeepBlockCache(unittest.TestCase):
         # depends on the caching policy used
 
 
-class TestInMemoryKeepBlockCache(TestKeepBlockCache):
+class TestInMemoryKeepBlockCache(_TestKeepBlockCache):
     """
     Tests for `InMemoryKeepBlockCache`.
     """
@@ -95,9 +95,9 @@ class TestInMemoryKeepBlockCache(TestKeepBlockCache):
         return InMemoryKeepBlockCache(cache_size)
 
 
-class TestKeepBlockCacheWithBlockStore(TestKeepBlockCache):
+class TestBlockStoreBackedKeepBlockCache(_TestKeepBlockCache):
     """
-    Tests for `KeepBlockCacheWithBlockStore`.
+    Tests for `BlockStoreBackedKeepBlockCache`.
     """
     def test_get_when_set_in_block_store_in_previous_cache(self):
         self.cache.block_store.put(LOCATOR_1, CONTENTS)
@@ -146,8 +146,8 @@ class TestKeepBlockCacheWithBlockStore(TestKeepBlockCache):
             InMemoryBlockStore(),
             InMemoryBlockStoreBookkeeper()
         )
-        return KeepBlockCacheWithBlockStore(block_store, cache_size)
+        return BlockStoreBackedKeepBlockCache(block_store, cache_size)
 
 
 # Work around to stop unittest from trying to run the abstract base class
-del TestKeepBlockCache
+del _TestKeepBlockCache
