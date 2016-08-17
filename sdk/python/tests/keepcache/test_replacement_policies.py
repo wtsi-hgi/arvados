@@ -10,7 +10,7 @@ from tests.keepcache._common import LOCATOR_1, LOCATOR_2
 _CONTENT_SIZE = 10
 
 
-class TestCacheReplacementPolicy(unittest.TestCase):
+class _TestCacheReplacementPolicy(unittest.TestCase):
     """
     Tests for `CacheReplacementPolicy`.
     """
@@ -34,7 +34,7 @@ class TestCacheReplacementPolicy(unittest.TestCase):
         self.assertIsNone(to_delete)
 
 
-class TestFIFOCacheReplacementPolicy(TestCacheReplacementPolicy):
+class TestFIFOCacheReplacementPolicy(_TestCacheReplacementPolicy):
     """
     Tests for `FIFOCacheReplacementPolicy`.
     """
@@ -47,7 +47,7 @@ class TestFIFOCacheReplacementPolicy(TestCacheReplacementPolicy):
         return FIFOCacheReplacementPolicy()
 
 
-class TestLastUsedReplacementPolicy(TestCacheReplacementPolicy):
+class TestLastUsedReplacementPolicy(_TestCacheReplacementPolicy):
     """
     Tests for `LastUsedReplacementPolicy`.
     """
@@ -78,4 +78,4 @@ class TestLastUsedReplacementPolicy(TestCacheReplacementPolicy):
 
 
 # Work around to stop unittest from trying to run the abstract base class
-del TestCacheReplacementPolicy
+del _TestCacheReplacementPolicy

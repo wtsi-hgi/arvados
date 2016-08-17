@@ -47,4 +47,3 @@ class TestGetterSetterCacheSlot(TestCacheSlot):
     def test_set_stores_externally(self):
         self.cache_slot.set(CONTENTS)
         self.setter.assert_called_once_with(self.cache_slot.locator, CONTENTS)
-

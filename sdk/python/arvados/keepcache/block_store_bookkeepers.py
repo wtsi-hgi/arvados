@@ -180,7 +180,7 @@ class BlockStoreBookkeeper(object):
                | self.get_all_put_records(locators, since) \
                | self.get_all_delete_records(locators, since)
 
-    def get_current_timestamp(self):
+    def _get_current_timestamp(self):
         """
         Gets a timestamp for the current time.
         :return: the current time
@@ -245,19 +245,19 @@ class InMemoryBlockStoreBookkeeper(BlockStoreBookkeeper):
 
     def record_get(self, locator):
         record = InMemoryBlockStoreBookkeeper.InMemoryBlockGetRecord(
-            locator, self.get_current_timestamp()
+            locator, self._get_current_timestamp()
         )
         self._records[BlockGetRecord].add(record)
 
     def record_put(self, locator, content_size):
         record = InMemoryBlockStoreBookkeeper.InMemoryBlockPutRecord(
-            locator, self.get_current_timestamp(), content_size
+            locator, self._get_current_timestamp(), content_size
         )
         self._records[BlockPutRecord].add(record)
 
     def record_delete(self, locator):
         record = InMemoryBlockStoreBookkeeper.InMemoryBlockDeleteRecord(
-            locator, self.get_current_timestamp()
+            locator, self._get_current_timestamp()
         )
         self._records[BlockDeleteRecord].add(record)
 
@@ -402,7 +402,7 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
         """
         record = cls()
         record.locator = locator
-        record.timestamp = self.get_current_timestamp()
+        record.timestamp = self._get_current_timestamp()
         return record
 
     def _create_session(self):

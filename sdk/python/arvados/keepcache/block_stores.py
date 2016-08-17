@@ -63,7 +63,6 @@ class InMemoryBlockStore(BlockStore):
     """
     Basic in-memory block store.
     """
-
     def __init__(self):
         self._data = dict()  # type: Dict[str, bytearray]
 
@@ -80,11 +79,10 @@ class InMemoryBlockStore(BlockStore):
         return True
 
 
-class BlockControl(object):
+class _BlockControl(object):
     """
-    TODO
+    Controls access to code within a `with` block.
     """
-
     def __init__(self):
         self.counter = 0
         self.condition = Condition()
@@ -114,7 +112,6 @@ class OpenTransactionBuffer(object):
         """
         Iterator for this type of buffer.
         """
-
         def __init__(self, open_transaction_buffer):
             self._open_transaction_buffer = open_transaction_buffer
             with self._open_transaction_buffer._read_block_control:
@@ -149,7 +146,7 @@ class OpenTransactionBuffer(object):
         self._transaction_closer = transaction_closer
         self._transaction = None
         self._buffer = None
-        self._read_block_control = BlockControl()
+        self._read_block_control = _BlockControl()
         self._close_transaction_lock = Lock()
         self._close_counter = 0
         self._open_transaction_lock = Lock()
@@ -350,7 +347,7 @@ class LMDBBlockStore(BlockStore):
         with self._database_lock:
             # Pause and close any buffers to the content that is about to be
             # overwritten
-            logger.info("Putting value for `%s`" % locator)
+            logger.info("Putting value of %d bytes for `%s`" % (len(content), locator))
             self._pause_and_close_buffers(locator)
             with self._database.begin(write=True) as transaction:
                 transaction.put(locator, content)
@@ -469,7 +466,6 @@ class BookkeepingBlockStore(BlockStore):
     Block store that uses a bookkeeper to record accesses and modifications to
     entries in an underlying block store.
     """
-
     def __init__(self, block_store, bookkeeper):
         """
         Constructor.

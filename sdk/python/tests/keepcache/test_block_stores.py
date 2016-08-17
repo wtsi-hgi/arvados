@@ -31,7 +31,7 @@ class _LazyCalculatedDict(UserDict):
         self.data[key] = value
 
 
-class TestBlockStore(unittest.TestCase):
+class _TestBlockStore(unittest.TestCase):
     """
     Tests for `BlockStore`.
     """
@@ -124,7 +124,7 @@ class TestBlockStore(unittest.TestCase):
         return temp_directory
 
 
-class TestInMemoryBlockStore(TestBlockStore):
+class TestInMemoryBlockStore(_TestBlockStore):
     """
     Tests for `InMemoryBlockStore`.
     """
@@ -132,7 +132,7 @@ class TestInMemoryBlockStore(TestBlockStore):
         return InMemoryBlockStore(), CACHE_SIZE
 
 
-class TestLMDBBlockStore(TestBlockStore):
+class TestLMDBBlockStore(_TestBlockStore):
     """
     Tests for `LMDBBlockStore`.
     """
@@ -145,7 +145,7 @@ class TestLMDBBlockStore(TestBlockStore):
         return block_store, block_store.calculate_usuable_size()
 
 
-class TestBookkeepingBlockStore(TestBlockStore):
+class TestBookkeepingBlockStore(_TestBlockStore):
     """
     Tests for `BookkeepingBlockStore`.
     """
@@ -184,4 +184,4 @@ class TestBookkeepingBlockStore(TestBlockStore):
 
 
 # Work around to stop unittest from trying to run the abstract base class
-del TestBlockStore
+del _TestBlockStore

@@ -138,7 +138,8 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         :type block_store: BookkeepingBlockStore
         :param cache_max: maximum cache size (default: 20GB)
         :type cache_max: int
-        :param cache_replacement_policy: TODO
+        :param cache_replacement_policy: policy used to determine what to
+        delete from the cache if required to store a new item
         :type cache_replacement_policy: CacheReplacementPolicy
         """
         super(BlockStoreBackedKeepBlockCache, self).__init__(cache_max)
@@ -300,8 +301,7 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
                     deleted = self.block_store.delete(delete_locator)
                     assert deleted
                 else:
-                    # Space has been allocated for content that is not written
-                    # yet
+                    # Space has been allocated for content that is not written yet
                     with self._writing_lock:
                         for locator in self._writing:
                             if write_wait not in self._writing_complete_listeners[locator]:

@@ -12,7 +12,7 @@ from arvados.keepcache.block_store_bookkeepers import \
 from tests.keepcache._common import LOCATORS, CONTENTS
 
 
-class TestBlockStoreBookkeeper(unittest.TestCase):
+class _TestBlockStoreBookkeeper(unittest.TestCase):
     """
     Unit tests for `BlockStoreBookkeeper`.
     """
@@ -32,8 +32,8 @@ class TestBlockStoreBookkeeper(unittest.TestCase):
         # Make timestamps unqiue and deterministic
         def create_timestamp():
             return datetime(
-                self.bookkeeper.get_current_timestamp.call_count, 1, 1)
-        self.bookkeeper.get_current_timestamp = MagicMock(
+                self.bookkeeper._get_current_timestamp.call_count, 1, 1)
+        self.bookkeeper._get_current_timestamp = MagicMock(
             side_effect=create_timestamp)
 
     def test_get_active_storage_size(self):
@@ -183,7 +183,7 @@ class TestBlockStoreBookkeeper(unittest.TestCase):
         self.assertIsInstance(record, record_type)
 
 
-class TestInMemoryBlockStoreBookkeeper(TestBlockStoreBookkeeper):
+class TestInMemoryBlockStoreBookkeeper(_TestBlockStoreBookkeeper):
     """
     Tests for `InMemoryBlockStoreBookkeeper`.
     """
@@ -191,7 +191,7 @@ class TestInMemoryBlockStoreBookkeeper(TestBlockStoreBookkeeper):
         return InMemoryBlockStoreBookkeeper()
 
 
-class TestSqlBlockStoreBookkeeper(TestBlockStoreBookkeeper):
+class TestSqlBlockStoreBookkeeper(_TestBlockStoreBookkeeper):
     """
     Tests for `SqlBlockStoreBookkeeper`.
     """
@@ -210,4 +210,4 @@ class TestSqlBlockStoreBookkeeper(TestBlockStoreBookkeeper):
 
 
 # Work around to stop unittest from trying to run the abstract base class
-del TestBlockStoreBookkeeper
+del _TestBlockStoreBookkeeper
