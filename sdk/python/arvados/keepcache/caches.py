@@ -41,7 +41,7 @@ class KeepBlockCache(object):
         """
         Gets the cache slot with the given locator.
         :param locator: the identifier of the entry in this cache
-        :type locator: str
+        :type locator: Union[str, unicode]
         :return: the cache slot if found, else `None`
         :rtype: Optional[CacheSlot]
         """
@@ -55,7 +55,7 @@ class KeepBlockCache(object):
         Despite the name, this method does not reserve actual memory in the
         cache.
         :param locator: the identifier of the entry in this cache
-        :type locator: str
+        :type locator: Union[str, unicode]
         :return: a tuple containing the reserved cache slot as the first element
         and whether the slot was newly created as the second element
         :rtype: Tuple[CacheSlot, bool]
@@ -163,6 +163,9 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         return self._block_store
 
     def get(self, locator):
+        if isinstance(locator, unicode):
+            locator = str(locator)
+
         # Return pre-existing model of slot if referenced elsewhere. This is
         # required to make the cache slot's blocking `get` method work in the
         # same was as it does with the in-memory cache. It also avoids wasting
@@ -181,6 +184,9 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
                 return self._create_cache_slot(locator, content)
 
     def reserve_cache(self, locator):
+        if isinstance(locator, unicode):
+            locator = str(locator)
+
         slot = self.get(locator)
         if slot is not None:
             return slot, False
