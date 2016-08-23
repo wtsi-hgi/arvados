@@ -11,6 +11,7 @@ import errno
 import re
 import logging
 
+from arvados.keepcache.buffers import OpenTransactionBuffer
 from .errors import KeepWriteError, AssertionError, ArgumentError
 from .keep import KeepLocator
 from ._normalize_stream import normalize_stream
@@ -829,7 +830,10 @@ class ArvadosFile(object):
         for lr in readsegs:
             block = self.parent._my_block_manager().get_block_contents(lr.locator, num_retries=num_retries, cache_only=(bool(data) and not exact))
             if block:
-                blockview = memoryview(block)
+                if isinstance(block, OpenTransactionBuffer):
+                    blockview = block
+                else:
+                    blockview = memoryview(block)
                 data.append(blockview[lr.segment_offset:lr.segment_offset+lr.segment_size].tobytes())
                 locs.add(lr.locator)
             else:
