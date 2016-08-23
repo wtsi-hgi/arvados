@@ -830,11 +830,14 @@ class ArvadosFile(object):
         for lr in readsegs:
             block = self.parent._my_block_manager().get_block_contents(lr.locator, num_retries=num_retries, cache_only=(bool(data) and not exact))
             if block:
+                start = lr.segment_offset
+                end = lr.segment_offset+lr.segment_size
                 if isinstance(block, PseudoBuffer):
-                    blockview = block
+                    datum = block[start:end]
                 else:
                     blockview = memoryview(block)
-                data.append(blockview[lr.segment_offset:lr.segment_offset+lr.segment_size].tobytes())
+                    datum = blockview[start:end].tobytes()
+                data.append(datum)
                 locs.add(lr.locator)
             else:
                 break
