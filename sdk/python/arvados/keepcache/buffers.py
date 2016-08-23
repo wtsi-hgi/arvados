@@ -1,7 +1,44 @@
 import logging
+from abc import ABCMeta
+from abc import abstractmethod
 from threading import Lock, Condition, Event
 
 logger = logging.getLogger(__name__)
+
+
+class PseudoBuffer(object):
+    """
+    Looks and smells like a Python 2 `buffer` object.
+    """
+    __metaclass__ = ABCMeta
+
+    @abstractmethod
+    def __getitem__(self, index):
+        """
+        Gets the item with the given index from this buffer.
+
+        Raises `IndexError` if index is out of bounds.
+        :param index: the index of the item to get
+        :type index: int
+        :return: the item at the given index
+        :rtype: byte
+        """
+
+    @abstractmethod
+    def __len__(self):
+        """
+        Gets the length of this buffer.
+        :return: the length of this buffer
+        :rtype: int
+        """
+
+    @abstractmethod
+    def __iter__(self):
+        """
+        Gets an iterator for this buffer.
+        :return: the iterator
+        :rtype: iter
+        """
 
 
 class _BlockControl(object):
@@ -27,7 +64,7 @@ class _BlockControl(object):
             self.condition.notify_all()
 
 
-class OpenTransactionBuffer(object):
+class OpenTransactionBuffer(PseudoBuffer):
     """
     Buffer that can only be read from whilst a transaction is open.
     """

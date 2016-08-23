@@ -1,21 +1,21 @@
-import functools
-import os
-import zlib
-import bz2
-import config
-import hashlib
-import threading
 import Queue
+import bz2
 import copy
 import errno
-import re
+import functools
+import hashlib
 import logging
+import os
+import re
+import threading
+import zlib
 
-from arvados.keepcache.buffers import OpenTransactionBuffer
-from .errors import KeepWriteError, AssertionError, ArgumentError
-from .keep import KeepLocator
+import config
+from arvados.keepcache.buffers import PseudoBuffer
 from ._normalize_stream import normalize_stream
 from ._ranges import locators_and_ranges, replace_range, Range
+from .errors import KeepWriteError, AssertionError, ArgumentError
+from .keep import KeepLocator
 from .retry import retry_method
 
 MOD = "mod"
@@ -830,7 +830,7 @@ class ArvadosFile(object):
         for lr in readsegs:
             block = self.parent._my_block_manager().get_block_contents(lr.locator, num_retries=num_retries, cache_only=(bool(data) and not exact))
             if block:
-                if isinstance(block, OpenTransactionBuffer):
+                if isinstance(block, PseudoBuffer):
                     blockview = block
                 else:
                     blockview = memoryview(block)

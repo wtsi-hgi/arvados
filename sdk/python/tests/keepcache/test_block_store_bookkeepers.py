@@ -9,7 +9,7 @@ from mock import MagicMock
 from arvados.keepcache.block_store_bookkeepers import \
     InMemoryBlockStoreBookkeeper, SqlBlockStoreBookkeeper, BlockGetRecord, \
     BlockDeleteRecord, BlockPutRecord
-from tests.keepcache._common import LOCATORS, CONTENTS
+from tests.keepcache._common import CONTENTS, LOCATORS
 
 
 class _TestBlockStoreBookkeeper(unittest.TestCase):
