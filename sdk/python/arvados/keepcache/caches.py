@@ -223,7 +223,6 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         with self._referenced_cache_slots_lock:
             slot = self._referenced_cache_slots.get(locator, None)
             if slot is not None:
-                assert slot.content == content
                 return slot
             slot = GetterSetterCacheSlot(
                 locator, self._get_content, self._set_content, content=content)
