@@ -1,3 +1,4 @@
+import logging
 import threading
 from abc import ABCMeta, abstractmethod
 from collections import defaultdict
@@ -5,6 +6,8 @@ from weakref import WeakValueDictionary
 
 from arvados.keepcache.replacement_policies import FIFOCacheReplacementPolicy
 from arvados.keepcache.slots import CacheSlot, GetterSetterCacheSlot
+
+_logger = logging.getLogger(__name__)
 
 
 class KeepBlockCache(object):
@@ -165,6 +168,7 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
     def get(self, locator):
         if isinstance(locator, unicode):
             locator = str(locator)
+        debug_message = "Get cache slot for `%s`" % locator
 
         # Return pre-existing model of slot if referenced elsewhere. This is
         # required to make the cache slot's blocking `get` method work in the
@@ -172,20 +176,26 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         # memory with multiple models of the same slot.
         slot = self._referenced_cache_slots.get(locator, None)
         if slot is not None:
-            # Slot already in memory
+            # Retrieved slot from reference
+            _logger.debug("%s (already referenced)" % debug_message)
             return slot
         else:
             content = self.block_store.get(locator)
             if content is None:
                 # No contents to create slot with
+                _logger.debug("%s (no content to create with)" % debug_message)
                 return None
             else:
-                # Create slot object with contents
-                return self._create_cache_slot(locator, content)
+                # Create slot
+                cache_slot = self._create_cache_slot(locator, content)
+                _logger.debug("%s (created with content, id=%s)"
+                              % (debug_message, id(cache_slot)))
+                return cache_slot
 
     def reserve_cache(self, locator):
         if isinstance(locator, unicode):
             locator = str(locator)
+        _logger.debug("Reserve cache slot for `%s`" % locator)
 
         slot = self.get(locator)
         if slot is not None:
@@ -248,16 +258,19 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         # Note: there is no do ... while loop in Python
         writing_locator_content = True
         while writing_locator_content:
-            if self._get_content(locator) == content:
-                # No point in writing same contents, which is highly likely
-                # given that the locator is a hash of the contents
-                return
-
+            _logger.debug("Waiting for lock to write content for `%s` "
+                          "(currently writing: %s)" % (locator, self._writing))
             self._writing_lock.acquire()
             writing_locator_content = locator in self._writing
             if not writing_locator_content:
-                self._writing.add(locator)
-                self._writing_lock.release()
+                if str(self._get_content(locator)) == content:
+                    _logger.debug("Content for `%s` already written" % locator)
+                    self._writing_lock.release()
+                    return
+                else:
+                    self._writing.add(locator)
+                    _logger.debug("Got lock to write to `%s`" % locator)
+                    self._writing_lock.release()
             else:
                 write_wait = threading.Lock()
                 write_wait.acquire()
@@ -269,10 +282,14 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
                 # Given that the locator is a hash of the content, it is highly
                 # likely at this point that the content has already been written
 
+        assert locator in self._writing
         required_space = self.block_store.calculate_stored_size(content)
         self._reserve_space_in_cache(required_space)
+        _logger.debug("Reserved %d byte(s) for writing content for `%s`"
+                      % (required_space, locator))
         assert self.block_store.bookkeeper.get_active_storage_size() + required_space <= self._cache_max
         self.block_store.put(locator, content)
+        _logger.debug("Put content for `%s`" % locator)
         self._reserved_space -= required_space
 
         with self._writing_lock:
@@ -293,7 +310,8 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         """
         if space > self.cache_max:
             raise ValueError("Cannot reserve more space in the cache than the "
-                             "space available in the cache")
+                             "space available in the cache (requested %d/%d bytes)"
+                             % (space, self.cache_max))
 
         with self._space_increase_lock:
             write_wait = threading.Semaphore(0)
@@ -304,6 +322,7 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
                 if delete_locator is not None:
                     assert delete_locator in [put.locator for put
                                               in self.block_store.bookkeeper.get_active()]
+                    _logger.debug("Deleting `%s` to make space" % delete_locator)
                     deleted = self.block_store.delete(delete_locator)
                     assert deleted
                 else:
@@ -329,5 +348,7 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         :return: the space capacity in bytes
         :rtype: int
         """
-        return self.cache_max - (self.block_store.bookkeeper.get_active_storage_size()
-                                 + self._reserved_space)
+        spare_capacity = self.cache_max - (self.block_store.bookkeeper.get_active_storage_size() + self._reserved_space)
+        assert 0 <= spare_capacity <= self.cache_max
+        _logger.debug("Block store has %d byte(s) of spare capacity" % spare_capacity)
+        return spare_capacity

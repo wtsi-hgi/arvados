@@ -1,5 +1,9 @@
+import logging
 import threading
 from abc import ABCMeta
+from threading import Lock
+
+_logger = logging.getLogger(__name__)
 
 
 class CacheSlot(object):
@@ -35,6 +39,8 @@ class CacheSlot(object):
         :return: the contents
         :rtype bytearray
         """
+        _logger.debug("Getting content for cache slot associated to `%s` "
+                      "(ready=%s)" % (self.locator, self.ready.is_set()))
         self.ready.wait()
         return self.content
 
@@ -46,6 +52,8 @@ class CacheSlot(object):
         :rtype: bytearray
         """
         self._content = content
+        _logger.debug("Set content for cache slot associated to `%s`"
+                      % self.locator)
         self.ready.set()
 
     def size(self):
@@ -82,18 +90,30 @@ class GetterSetterCacheSlot(CacheSlot):
         super(GetterSetterCacheSlot, self).__init__(locator, content)
         self._content_getter = content_getter
         self._content_setter = content_setter
+        self._set_lock = Lock()
+        self._get_lock = Lock()
 
     def get(self):
+        _logger.debug("Getting content for cache slot associated to `%s` "
+                      % self.locator)
         if self.content is not None:
             return self.content
         else:
-            content = self._content_getter(self.locator)
-            if content is not None:
-                super(GetterSetterCacheSlot, self).set(content)
-                return content
-            else:
-                return super(GetterSetterCacheSlot, self).get()
+            with self._get_lock:
+                if self.content is not None:
+                    # Another thread has got whilst waiting for get lock
+                    return self.content
+                else:
+                    content = self._content_getter(self.locator)
+                    if content is not None:
+                        super(GetterSetterCacheSlot, self).set(content)
+                        return content
+                    else:
+                        return super(GetterSetterCacheSlot, self).get()
 
     def set(self, content):
-        self._content_setter(self.locator, content)
-        super(GetterSetterCacheSlot, self).set(content)
+        with self._set_lock:
+            _logger.debug("Setting content of %d byte(s) for `%s`"
+                          % (len(content), self.locator))
+            self._content_setter(self.locator, content)
+            super(GetterSetterCacheSlot, self).set(content)

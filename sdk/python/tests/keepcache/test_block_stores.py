@@ -5,11 +5,11 @@ from abc import ABCMeta, abstractmethod
 from bisect import bisect_left
 from tempfile import mkdtemp
 
-from arvados.keepcache.block_stores import LMDBBlockStore, \
-    InMemoryBlockStore, BookkeepingBlockStore
 from arvados.keepcache.block_store_bookkeepers import \
     InMemoryBlockStoreBookkeeper, BlockGetRecord, BlockPutRecord, \
     BlockDeleteRecord
+from arvados.keepcache.block_stores import LMDBBlockStore, \
+    InMemoryBlockStore, BookkeepingBlockStore
 from tests.keepcache._common import CONTENTS, LOCATOR_2, CACHE_SIZE, LOCATOR_1
 
 

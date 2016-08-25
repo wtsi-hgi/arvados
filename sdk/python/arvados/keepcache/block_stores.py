@@ -1,13 +1,17 @@
 import logging
+import random
+import traceback
 from abc import ABCMeta, abstractmethod
 from math import ceil
-from threading import Lock, RLock
+from threading import Lock, RLock, Thread
+from time import sleep
 
 import lmdb
 
 from arvados.keepcache.buffers import OpenTransactionBuffer
+from arvados.keepcache.dump_thread_log import dump_thread_log
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 
 class BlockStore(object):
@@ -141,7 +145,7 @@ class LMDBBlockStore(BlockStore):
 
         # Need to prevent use whilst writing
         with self._database_lock:
-            logger.info("Getting value for `%s`" % locator)
+            _logger.debug("Getting value buffer for `%s` in LMDB" % locator)
 
             # Checks if key exists - return `None` if it doesn't
             transaction = self._open_read_transaction()
@@ -149,6 +153,7 @@ class LMDBBlockStore(BlockStore):
             key_found = cursor.set_key(locator)
             transaction.abort()
             if not key_found:
+                _logger.debug("No value for `%s` in LMDB" % locator)
                 return None
 
             content_buffer = OpenTransactionBuffer(
@@ -165,16 +170,25 @@ class LMDBBlockStore(BlockStore):
         with self._database_lock:
             # Pause and close any buffers to the content that is about to be
             # overwritten
-            logger.info("Putting value of %d bytes for `%s`" % (len(content), locator))
             self._pause_and_close_buffers(locator)
+            _logger.debug("Putting value of %d bytes for `%s` in LMDB"
+                          % (len(content), locator))
             with self._database.begin(write=True) as transaction:
-                transaction.put(locator, content)
+                id = random.random()
+                _logger.debug("Put start for %s (%s)" % (locator, id))
+                try:
+                    transaction.put(locator, content)
+                except Exception as e:
+                    _logger.debug(traceback.format_exc(e))
+                    raise e
+                _logger.debug("Put complete (%s)" % id)
+            _logger.debug("Value for `%s` put in LMDB" % locator)
             self._resume_buffers(locator)
 
     def delete(self, locator):
         # Need to prevent new buffers being acquired via `get`
         with self._database_lock:
-            logger.info("Deleting value for `%s`" % locator)
+            _logger.debug("Deleting value for `%s` in LMDB" % locator)
             # Pause and close all buffers so the deleted entry is not maintained
             # in snapshot held by reader transaction
             self._pause_and_close_buffers()
@@ -233,13 +247,15 @@ class LMDBBlockStore(BlockStore):
         """
         for open_transaction_buffer in self._buffers.values():
             if locator is None or open_transaction_buffer.locator == locator:
+                _logger.debug("Closing buffer (%s) for `%s`"
+                              % (id(self._buffers), open_transaction_buffer.locator))
                 open_transaction_buffer.pause()
                 open_transaction_buffer.close_transaction()
 
     def _resume_buffers(self, locator=None):
         """
         Resumes the buffers.
-        :param locator: optionally only resumes buffers with the given locator
+        :param locator: optionally only resumes buffers for the given locator
         :type locator: Optional[str]
         """
         for open_transaction_buffer in self._buffers.values():
@@ -312,3 +328,11 @@ class BookkeepingBlockStore(BlockStore):
 
     def calculate_stored_size(self, content):
         return self._block_store.calculate_stored_size(content)
+
+
+
+# def log_dump():
+#     sleep(15)
+#     dump_thread_log("/tmp/cn13/dump.txt")
+#
+# Thread(target=log_dump).start()

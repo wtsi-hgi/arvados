@@ -1,15 +1,14 @@
 import unittest
 from abc import ABCMeta, abstractmethod
-
 from multiprocessing import Lock, Semaphore
 from threading import Thread
 
 from mock import MagicMock
 
-from arvados.keepcache.block_stores import BookkeepingBlockStore, \
-    InMemoryBlockStore
 from arvados.keepcache.block_store_bookkeepers import \
     InMemoryBlockStoreBookkeeper
+from arvados.keepcache.block_stores import BookkeepingBlockStore, \
+    InMemoryBlockStore
 from arvados.keepcache.caches import InMemoryKeepBlockCache, \
     BlockStoreBackedKeepBlockCache
 from arvados.keepcache.slots import CacheSlot
