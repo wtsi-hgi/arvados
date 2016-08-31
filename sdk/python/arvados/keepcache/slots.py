@@ -94,22 +94,28 @@ class GetterSetterCacheSlot(CacheSlot):
         self._get_lock = Lock()
 
     def get(self):
-        _logger.debug("Getting content for cache slot associated to `%s` "
+        _logger.debug("Getting content for cache slot associated to `%s`"
                       % self.locator)
         if self.content is not None:
             return self.content
         else:
-            with self._get_lock:
-                if self.content is not None:
-                    # Another thread has got whilst waiting for get lock
-                    return self.content
+            self._get_lock.acquire()
+            if self.content is not None:
+                # Another thread has got whilst waiting for get lock
+                self._get_lock.release()
+                return self.content
+            else:
+                content = self._content_getter(self.locator)
+                if content is not None:
+                    super(GetterSetterCacheSlot, self).set(content)
+                    self._get_lock.release()
+                    return content
                 else:
-                    content = self._content_getter(self.locator)
-                    if content is not None:
-                        super(GetterSetterCacheSlot, self).set(content)
-                        return content
-                    else:
-                        return super(GetterSetterCacheSlot, self).get()
+                    _logger.debug("Getting (lockable!)")
+                    # MUST release lock before calling the get method - use of
+                    # "with" does not do this!
+                    self._get_lock.release()
+                    return super(GetterSetterCacheSlot, self).get()
 
     def set(self, content):
         with self._set_lock:
