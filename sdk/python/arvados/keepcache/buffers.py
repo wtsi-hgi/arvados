@@ -48,7 +48,7 @@ class _BlockControl(object):
     def __init__(self):
         self.counter = 0
         self.exit_condition = Condition()
-        self.entry_lock = RLock()
+        self.entry_lock = Lock()
 
     def __enter__(self):
         with self.entry_lock:
@@ -195,8 +195,6 @@ class OpenTransactionBuffer(PseudoBuffer):
                     self._transaction_closer(self._transaction)
                     self._transaction = None
                     self._buffer = None
-                    # self._read_block_control.entry_allowed.set()
-                    # self._read_block_control.condition.release()
 
     def _open_transaction(self):
         """
