@@ -111,7 +111,6 @@ class GetterSetterCacheSlot(CacheSlot):
                     self._get_lock.release()
                     return content
                 else:
-                    _logger.debug("Getting (lockable!)")
                     # MUST release lock before calling the get method - use of
                     # "with" does not do this!
                     self._get_lock.release()

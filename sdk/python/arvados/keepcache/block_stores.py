@@ -1,15 +1,12 @@
 import logging
-import random
-import traceback
 from abc import ABCMeta, abstractmethod
 from math import ceil
-from threading import Lock, RLock, Thread
-from time import sleep
+from threading import Lock, RLock
+from weakref import WeakValueDictionary
 
 import lmdb
 
 from arvados.keepcache.buffers import OpenTransactionBuffer
-from arvados.keepcache.dump_thread_log import dump_thread_log
 
 _logger = logging.getLogger(__name__)
 
@@ -134,12 +131,14 @@ class LMDBBlockStore(BlockStore):
                                    max_readers=max_readers)
         self._max_size = max_size
         self._max_readers = max_readers
-        self._buffers = dict()  # type: Dict[str, OpenTransactionBuffer]
+        self._buffers = WeakValueDictionary()  # type: Dict[str, OpenTransactionBuffer]
         self._database_lock = Lock()
         self._read_transaction_rlock = RLock()
         self._reader_count = 0
 
     def get(self, locator):
+        if not isinstance(locator, bytes):
+            locator = locator.encode()
         if locator in self._buffers:
             return self._buffers[locator]
 
@@ -151,7 +150,7 @@ class LMDBBlockStore(BlockStore):
             transaction = self._open_read_transaction()
             cursor = transaction.cursor()
             key_found = cursor.set_key(locator)
-            transaction.abort()
+            self._close_read_transaction(transaction)
             if not key_found:
                 _logger.debug("No value for `%s` in LMDB" % locator)
                 return None
@@ -163,37 +162,35 @@ class LMDBBlockStore(BlockStore):
             return content_buffer
 
     def put(self, locator, content):
+        if not isinstance(locator, bytes):
+            locator = locator.encode()
         if not isinstance(content, bytearray):
             content = bytearray(content)
 
         # Need to prevent new buffers being acquired via `get`
         with self._database_lock:
-            # Pause and close any buffers to the content that is about to be
-            # overwritten
-            self._pause_and_close_buffers(locator)
+            # Close any buffers so old snapshot of data about to be overwritten
+            # is not kept
+            self._close_buffers()
+
             _logger.debug("Putting value of %d bytes for `%s` in LMDB"
                           % (len(content), locator))
             with self._database.begin(write=True) as transaction:
-                id = random.random()
-                _logger.debug("Put start for %s (%s)" % (locator, id))
-                try:
-                    transaction.put(locator, content)
-                except Exception as e:
-                    _logger.debug(traceback.format_exc(e))
-                    raise e
-                _logger.debug("Put complete (%s)" % id)
+                transaction.put(locator, content)
             _logger.debug("Value for `%s` put in LMDB" % locator)
-            self._resume_buffers(locator)
+            self._resume_buffers()
 
     def delete(self, locator):
+        if not isinstance(locator, bytes):
+            locator = locator.encode()
+
         # Need to prevent new buffers being acquired via `get`
         with self._database_lock:
-            _logger.debug("Deleting value for `%s` in LMDB" % locator)
-            # Pause and close all buffers so the deleted entry is not maintained
-            # in snapshot held by reader transaction
-            self._pause_and_close_buffers()
+            # Close all buffers so the deleted entry is not maintained in
+            # snapshot held by reader transaction
+            self._close_buffers()
 
-            # Delete from LMDB database
+            _logger.debug("Deleting value for `%s` in LMDB" % locator)
             with self._database.begin(write=True) as transaction:
                 deleted = transaction.delete(locator)
 
@@ -239,9 +236,9 @@ class LMDBBlockStore(BlockStore):
         """
         return self._database.stat()["psize"]
 
-    def _pause_and_close_buffers(self, locator=None):
+    def _close_buffers(self, locator=None):
         """
-        Pauses and then closes buffers.
+        Closes buffers.
         :param locator: optionally only closes buffers with the given locator
         :type locator: Optional[str]
         """
@@ -249,7 +246,6 @@ class LMDBBlockStore(BlockStore):
             if locator is None or open_transaction_buffer.locator == locator:
                 _logger.debug("Closing buffer (%s) for `%s`"
                               % (id(self._buffers), open_transaction_buffer.locator))
-                open_transaction_buffer.pause()
                 open_transaction_buffer.close_transaction()
 
     def _resume_buffers(self, locator=None):
@@ -270,11 +266,13 @@ class LMDBBlockStore(BlockStore):
         Note: the max readers limit does not stop the opening of non-readonly
         transactions.
         :return: the opened transaction
-        :rtype: Transaction
+        :rtype: lmdb.Transaction
         """
         with self._read_transaction_rlock:
             if self._reader_count == self._max_readers:
-                # Max number of reader transactions - closing all
+                assert self._reader_count <= len(self._buffers.values())
+                _logger.info("Max number of reader transactions - closing all "
+                             "%d readers" % (len(self._buffers.values())))
                 for open_transaction_buffer in self._buffers.values():
                     open_transaction_buffer.close_transaction()
                 self._reader_count = 0
@@ -287,7 +285,7 @@ class LMDBBlockStore(BlockStore):
         """
         Closes a read-only database transaction.
         :param transaction: the read-only transaction to be closed
-        :type Transaction
+        :type lmdb.Transaction
         """
         with self._read_transaction_rlock:
             transaction.abort()
@@ -328,11 +326,3 @@ class BookkeepingBlockStore(BlockStore):
 
     def calculate_stored_size(self, content):
         return self._block_store.calculate_stored_size(content)
-
-
-
-# def log_dump():
-#     sleep(15)
-#     dump_thread_log("/tmp/cn13/dump.txt")
-#
-# Thread(target=log_dump).start()

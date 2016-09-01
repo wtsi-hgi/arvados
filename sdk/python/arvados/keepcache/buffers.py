@@ -1,7 +1,8 @@
 import logging
 from abc import ABCMeta
 from abc import abstractmethod
-from threading import Lock, Condition, Event, RLock
+from thread import get_ident
+from threading import Lock, Condition
 
 _logger = logging.getLogger(__name__)
 
@@ -46,19 +47,34 @@ class _BlockControl(object):
     Controls access to code within a `with` block.
     """
     def __init__(self):
-        self.counter = 0
         self.exit_condition = Condition()
         self.entry_lock = Lock()
+        # "Bag" of threads in block
+        self._entries_in_block = list()   # type: List[int]
 
     def __enter__(self):
-        with self.entry_lock:
-            self.counter += 1
+        # Note: This looks similar to what an RLock does. However, RLocks can
+        # only be released by threads that hold the lock. This does not allow
+        # a third-party thread to control new threads from entering the block
+        thread_id = get_ident()
+        if thread_id not in self._entries_in_block:
+            with self.entry_lock:
+                self._entries_in_block.append(thread_id)
 
     def __exit__(self, *args, **kwargs):
+        thread_id = get_ident()
+        assert thread_id in self._entries_in_block
+        self._entries_in_block.remove(thread_id)
         with self.exit_condition:
-            self.counter -= 1
-            assert self.counter >= 0
             self.exit_condition.notify_all()
+
+    @property
+    def counter(self):
+        """
+        Gets the number of entries in the block.
+        :return: number of entries in block
+        """
+        return len(self._entries_in_block)
 
 
 class OpenTransactionBuffer(PseudoBuffer):
@@ -111,12 +127,14 @@ class OpenTransactionBuffer(PseudoBuffer):
         self._close_counter = 0
         self._paused = False
 
-    def __iter__(self):
-        return OpenTransactionBuffer._BufferIterator(self)
-
     def __del__(self):
         if self._has_open_transaction():
+            _logger.debug("Destructor called for buffer associated with %s"
+                          % self.locator)
             self.close_transaction()
+
+    def __iter__(self):
+        return OpenTransactionBuffer._BufferIterator(self)
 
     def __getitem__(self, index):
         with self._read_block_control:
@@ -183,18 +201,21 @@ class OpenTransactionBuffer(PseudoBuffer):
     def close_transaction(self):
         """
         Closes the transaction through which the buffer data is accessed.
+        Buffer will be paused once closed.
         """
         if self._has_open_transaction():
             with self._change_transaction_lock:
                 if self._has_open_transaction():
                     if not self._paused:
                         self.pause()
-                    _logger.info(
+                    _logger.debug(
                         "Closing transaction for buffer associated to `%s`"
                         % self.locator)
                     self._transaction_closer(self._transaction)
                     self._transaction = None
                     self._buffer = None
+                _logger.debug("Closed buffer assocaited to `%s`"
+                              % self.locator)
 
     def _open_transaction(self):
         """
@@ -204,7 +225,7 @@ class OpenTransactionBuffer(PseudoBuffer):
             with self._change_transaction_lock:
                 # Ensures transaction not opened whilst waiting for lock
                 if not self._has_open_transaction():
-                    _logger.info("Opening transaction for buffer associated "
+                    _logger.debug("Opening transaction for buffer associated "
                                  "to `%s`" % self.locator)
                     assert self._transaction is None
                     assert self._buffer is None
@@ -212,6 +233,8 @@ class OpenTransactionBuffer(PseudoBuffer):
                     self._buffer = self._transaction.get(self.locator)
                     if self._buffer is None:
                         raise OpenTransactionBuffer._NO_LONGER_VALID_ERROR
+                    # Resume any paused access
+                    self.resume()
 
     def _has_open_transaction(self):
         """
