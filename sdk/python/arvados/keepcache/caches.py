@@ -186,19 +186,18 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
                 _logger.debug("%s (no content to create with)" % debug_message)
                 return None
             else:
-                # Create slot
+                # Create slot (can also get reference if created just before)
                 cache_slot = self._create_cache_slot(locator, content)
-                _logger.debug("%s (created with content, id=%s)"
+                _logger.debug("%s (created or got from reference, id=%s)"
                               % (debug_message, id(cache_slot)))
                 return cache_slot
 
     def reserve_cache(self, locator):
         if isinstance(locator, unicode):
             locator = str(locator)
-        _logger.debug("Reserve cache slot for `%s`" % locator)
-
         slot = self.get(locator)
         if slot is not None:
+            _logger.debug("Slot exists for `%s` (%s)" % (locator, id(slot)))
             return slot, False
         else:
             return self._create_cache_slot(locator), True
@@ -223,7 +222,9 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         with self._referenced_cache_slots_lock:
             slot = self._referenced_cache_slots.get(locator, None)
             if slot is not None:
+                _logger.debug("Slot exists for `%s` (%s)" % (locator, id(slot)))
                 return slot
+            _logger.debug("Creating cache slot for locator `%s`" % locator)
             slot = GetterSetterCacheSlot(
                 locator, self._get_content, self._set_content, content=content)
             self._referenced_cache_slots[locator] = slot
@@ -260,6 +261,7 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
             _logger.debug("Waiting for lock to write content for `%s` "
                           "(currently writing: %s)" % (locator, self._writing))
             self._writing_lock.acquire()
+            _logger.debug("Got lock to write to `%s`" % locator)
             writing_locator_content = locator in self._writing
             if not writing_locator_content:
                 if str(self._get_content(locator)) == content:
@@ -268,7 +270,6 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
                     return
                 else:
                     self._writing.add(locator)
-                    _logger.debug("Got lock to write to `%s`" % locator)
                     self._writing_lock.release()
             else:
                 write_wait = threading.Lock()
