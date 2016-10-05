@@ -196,17 +196,20 @@ class TestSqlBlockStoreBookkeeper(_TestBlockStoreBookkeeper):
     Tests for `SqlBlockStoreBookkeeper`.
     """
     def setUp(self):
-        self._database_locations = []   # type: List[str]
+        self._temp_locations = []   # type: List[str]
         super(TestSqlBlockStoreBookkeeper, self).setUp()
 
     def tearDown(self):
-        for location in self._database_locations:
+        for location in self._temp_locations:
             os.remove(location)
 
     def _create_bookkeeper(self):
         _, database_location = tempfile.mkstemp()
-        self._database_locations.append(database_location)
-        return SqlBlockStoreBookkeeper("sqlite:///%s" % database_location)
+        self._temp_locations.append(database_location)
+        database_lock_location = "%s.lock" % database_location
+        self._temp_locations.append(database_lock_location)
+        return SqlBlockStoreBookkeeper(
+            "sqlite:///%s" % database_location, database_lock_location)
 
 
 # Work around to stop unittest from trying to run the abstract base class

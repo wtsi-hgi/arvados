@@ -10,6 +10,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.sql import func
 from sqlalchemy.sql.elements import or_
 
+from arvados.keepcache._locks import ThreadAndProcessLock
+
 
 class BlockRecord(object):
     """
@@ -327,19 +329,19 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
                 return record_type
         return None
 
-    def __init__(self, database_location, concurrent_write_supported=False):
+    def __init__(self, database_location, write_lock_location=None):
         """
         Constructor.
         :param database_location: the location of the database
         :type database_location: str
-        :param concurrent_write_supported: whether the database supports
-        concurrent writes. SQLite does not support such writes
-        :type concurrent_write_supported: bool
+        :param write_lock_location: write lock file. This is required for
+        SQLite as it does not support concurrent writes
+        :type write_lock_location: Optional[str]
         """
         self._engine = create_engine(database_location)
         SqlBlockStoreBookkeeper._SQLAlchemyModel.metadata.create_all(
             bind=self._engine)
-        self._write_lock = Lock() if not concurrent_write_supported else None
+        self._write_lock = ThreadAndProcessLock(write_lock_location) if write_lock_location else None
 
     def get_active(self):
         PutRecord = SqlBlockStoreBookkeeper._SqlAlchemyBlockPutRecord

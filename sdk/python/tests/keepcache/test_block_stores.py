@@ -143,7 +143,7 @@ class TestLMDBBlockStore(_TestBlockStore):
         temp_directory = self._create_temp_directory()
         block_store = LMDBBlockStore(
             temp_directory, CACHE_SIZE, TestLMDBBlockStore._MAX_READERS)
-        return block_store, block_store.calculate_usuable_size()
+        return block_store, block_store.calculate_usable_size()
 
 
 class TestBookkeepingBlockStore(_TestBlockStore):

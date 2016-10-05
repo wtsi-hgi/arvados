@@ -1,13 +1,14 @@
 import logging
-import traceback
+import os
 from abc import ABCMeta, abstractmethod
+from errno import EEXIST
 from math import ceil
-from threading import Lock, BoundedSemaphore
-from weakref import WeakValueDictionary
+from threading import Lock
 
 import lmdb
 
-from arvados.keepcache.buffers import OpenTransactionBuffer
+from arvados.keepcache._locks import ThreadAndProcessLock
+from arvados.keepcache.buffers import OpeningBuffer
 
 _logger = logging.getLogger(__name__)
 
@@ -17,6 +18,22 @@ class BlockStore(object):
     Store for blocks.
     """
     __metaclass__ = ABCMeta
+
+    def __init__(self):
+        """
+        Constructor.
+        """
+        self._exclusive_write_access = Lock()
+
+    @property
+    def exclusive_write_access(self):
+        """
+        Gets lock that can be acquired to get exclusive access to the block
+        store.
+        :return: write access lock
+        :rtype: Lock
+        """
+        return self._exclusive_write_access
 
     @abstractmethod
     def get(self, locator):
@@ -68,6 +85,7 @@ class InMemoryBlockStore(BlockStore):
     Basic in-memory block store.
     """
     def __init__(self):
+        super(InMemoryBlockStore, self).__init__()
         self._data = dict()  # type: Dict[str, bytearray]
 
     def get(self, locator):
@@ -115,7 +133,8 @@ class LMDBBlockStore(BlockStore):
     """
     _HEADER_SIZE = 16
 
-    def __init__(self, directory, max_size, max_readers=126, max_spare_transactions=4):
+    def __init__(self, directory, max_size, max_readers=None,
+                 max_spare_transactions=None):
         """
         Constructor.
         :param directory: the directory to use for the database (will create if
@@ -124,93 +143,78 @@ class LMDBBlockStore(BlockStore):
         :type directory: str
         :param max_size: maximum size that the database can grow to in bytes
         :type max_size: int
-        :param max_readers: the maximum number of readers. Ensure this
+        :param max_readers: the maximum number of readers. An error will be
+        raised if the supply of readers is extinguished. LMDB's creator states
+        that a thread may only "have" one transaction at a time
+        (http://www.openldap.org/lists/openldap-devel/201409/msg00001.html).
+        Therefore this should be set to the maximum number of threads that can
+        access the database
         :type max_readers: int
         :param max_spare_transactions: maximum number of transactions to keep
         close to hand
         :type max_spare_transactions: int
         """
         super(LMDBBlockStore, self).__init__()
-        self._database = lmdb.open(directory, writemap=True, map_size=max_size,
-                                   max_readers=max_readers, max_spare_txns=max_spare_transactions)
+
+        if not os.path.exists(directory):
+            # Surround in try to cope with race condition
+            try:
+                os.mkdir(directory)
+            except OSError as e:
+                # In Python 3 (i.e. the current version of Python as of the last ~8 years)
+                # we could just use `FileExistsError`...
+                if e.errno != EEXIST:
+                    raise e
+
+        self._exclusive_write_access = ThreadAndProcessLock(
+            os.path.join(directory, "access.lock"))
+        with self._exclusive_write_access:
+            self._database = lmdb.open(
+                directory, writemap=True, map_size=max_size,
+                max_readers=max_readers, max_spare_txns=max_spare_transactions)
         self._max_size = max_size
-        self._max_readers = max_readers
-        self._buffers = WeakValueDictionary()  # type: Dict[str, OpenTransactionBuffer]
-        self._database_lock = Lock()
-        self._read_transaction_lock = Lock()
-        self._reader_semaphore = BoundedSemaphore(max_readers)
-        self._reader_count = 0
-        self._reader_count_lock = Lock()
+        self._transaction_lock = Lock()
 
     def get(self, locator):
         if not isinstance(locator, bytes):
             locator = locator.encode()
         _logger.debug("Getting value buffer for `%s` in LMDB" % locator)
 
-        if locator in self._buffers:
-            return self._buffers[locator]
+        with self._transaction_lock:
+            with self._database.begin() as transaction:
+                # Checks if key exists - return `None` if it doesn't
+                cursor = transaction.cursor()
+                key_found = cursor.set_key(locator)
+                if not key_found:
+                    _logger.debug("No value for `%s` in LMDB" % locator)
+                    return None
 
-        # Need to prevent use whilst reading
-        with self._database_lock:
-            # Checks if key exists - return `None` if it doesn't
-            transaction = self._open_read_transaction()
-            cursor = transaction.cursor()
-            key_found = cursor.set_key(locator)
-            self._close_read_transaction(transaction)
-            if not key_found:
-                _logger.debug("No value for `%s` in LMDB" % locator)
-                return None
-
-            content_buffer = OpenTransactionBuffer(
-                locator, self._open_read_transaction,
-                self._close_read_transaction)
-            self._buffers[locator] = content_buffer
-            return content_buffer
+        content_buffer = OpeningBuffer(locator, self._database, self._transaction_lock)
+        return content_buffer
 
     def put(self, locator, content):
         if not isinstance(locator, bytes):
             locator = locator.encode()
         if not isinstance(content, bytearray):
             content = bytearray(content)
-
-        # Need to prevent new buffers being acquired via `get`
-        with self._database_lock:
-            # Close any buffers so old snapshot of data about to be overwritten
-            # is not kept
-            _logger.debug("Closing buffers before put for `%s`" % locator)
-            self._close_buffers()
-
-            _logger.debug("Putting value of %d bytes for `%s` in LMDB"
-                          % (len(content), locator))
+        _logger.debug("Putting value of %d bytes for `%s` in LMDB"
+                      % (len(content), locator))
+        # TODO: Not sure if transaction lock required for write transaction
+        with self._transaction_lock:
             with self._database.begin(write=True) as transaction:
                 transaction.put(locator, content)
-            _logger.debug("Value for `%s` put in LMDB" % locator)
-            self._resume_buffers()
 
     def delete(self, locator):
         if not isinstance(locator, bytes):
             locator = locator.encode()
 
-        # Need to prevent new buffers being acquired via `get`
-        with self._database_lock:
-            # Close all buffers so the deleted entry is not maintained in
-            # snapshot held by reader transaction
-            _logger.debug("Closing buffers before delete for `%s`" % locator)
-            self._close_buffers()
-
-            _logger.debug("Deleting value for `%s` in LMDB" % locator)
+        _logger.debug("Deleting value for `%s` in LMDB" % locator)
+        # TODO: Not sure if transaction lock required for write transaction
+        with self._transaction_lock:
             with self._database.begin(write=True) as transaction:
                 deleted = transaction.delete(locator)
 
-            # Resume buffers as transaction is complete
-            self._resume_buffers()
-
-            if locator in self._buffers:
-                # Dereference existing buffers for locator, which will now be
-                # invalid
-                del self._buffers[locator]
-
-            return deleted
+        return deleted
 
     def calculate_stored_size(self, content):
         # Note: if max_key_size + size <= 2040, LMDB will store multiple
@@ -223,12 +227,14 @@ class LMDBBlockStore(BlockStore):
         return int(ceil(float(LMDBBlockStore._HEADER_SIZE + max_key_size + size)
                         / float(page_size)) * page_size)
 
-    def calculate_usuable_size(self):
+    def calculate_usable_size(self):
         """
         Calculates the usable size of this block store.
         :return: the usable size in bytes
         :rtype: int
         """
+        # TODO: Ignoring space that cannot be used because it has been "wedged"
+        # open by readers
         page_size = self._get_page_size()
         # Fixed cost (e.g. the pointer to the data root, free list root, etc)
         fixed_cost = 4 * page_size + LMDBBlockStore._HEADER_SIZE
@@ -244,63 +250,6 @@ class LMDBBlockStore(BlockStore):
         """
         return self._database.stat()["psize"]
 
-    def _close_buffers(self, locator=None):
-        """
-        Closes buffers.
-        :param locator: optionally only closes buffers with the given locator
-        :type locator: Optional[str]
-        """
-        for open_transaction_buffer in self._buffers.values():
-            if locator is None or open_transaction_buffer.locator == locator:
-                _logger.debug("Closing buffer (%s) for `%s`"
-                              % (id(self._buffers), open_transaction_buffer.locator))
-                open_transaction_buffer.close_transaction()
-
-    def _resume_buffers(self, locator=None):
-        """
-        Resumes the buffers.
-        :param locator: optionally only resumes buffers for the given locator
-        :type locator: Optional[str]
-        """
-        for open_transaction_buffer in self._buffers.values():
-            if locator is None or open_transaction_buffer.locator == locator:
-                open_transaction_buffer.resume()
-
-    def _open_read_transaction(self):
-        """
-        Opens a read-only database transaction, dealing with limits on the
-        maximum number of readers. Only one transaction should be opened per
-        buffer.
-
-        Note: the max readers limit does not stop the opening of non-readonly
-        transactions.
-        :return: the opened transaction
-        :rtype: lmdb.Transaction
-        """
-        _logger.debug("Going to acquire reader semaphore (currently %d/%d)"
-                      % (self._reader_count, self._max_readers))
-        self._reader_semaphore.acquire()
-        with self._reader_count_lock:
-            self._reader_count += 1
-            _logger.debug("Reader semaphore acquired (currently %d/%d)"
-                          % (self._reader_count, self._max_readers))
-        assert self._reader_count <= self._max_readers
-        transaction = self._database.begin(buffers=True)
-        return transaction
-
-    def _close_read_transaction(self, transaction):
-        """
-        Closes a read-only database transaction.
-        :param transaction: the read-only transaction to be closed
-        :type lmdb.Transaction
-        """
-        transaction.abort()
-        _logger.debug("Closed a transaction")
-        with self._reader_count_lock:
-            self._reader_count -= 1
-            assert self._reader_count >= 0
-        self._reader_semaphore.release()
-
 
 class BookkeepingBlockStore(BlockStore):
     """
@@ -315,6 +264,7 @@ class BookkeepingBlockStore(BlockStore):
         :param bookkeeper: bookkeeper
         :type bookkeeper: BlockStoreBookkeeper
         """
+        super(BookkeepingBlockStore, self).__init__()
         self._block_store = block_store
         self.bookkeeper = bookkeeper
 

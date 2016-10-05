@@ -284,13 +284,14 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
 
         assert locator in self._writing
         required_space = self.block_store.calculate_stored_size(content)
-        self._reserve_space_in_cache(required_space)
-        _logger.debug("Reserved %d byte(s) for writing content for `%s`"
-                      % (required_space, locator))
-        assert self.block_store.bookkeeper.get_active_storage_size() + required_space <= self._cache_max
-        self.block_store.put(locator, content)
-        _logger.debug("Put content for `%s`" % locator)
-        self._reserved_space -= required_space
+        with self._block_store.exclusive_write_access:
+            self._reserve_space_in_cache(required_space)
+            _logger.debug("Reserved %d byte(s) for writing content for `%s`"
+                          % (required_space, locator))
+            assert self.block_store.bookkeeper.get_active_storage_size() + required_space <= self._cache_max
+            self.block_store.put(locator, content)
+            _logger.debug("Put content for `%s`" % locator)
+            self._reserved_space -= required_space
 
         with self._writing_lock:
             self._writing.remove(locator)
