@@ -7,6 +7,7 @@ from threading import Lock
 
 import lmdb
 
+from arvados.keepcache._common import to_bytes
 from arvados.keepcache._locks import ThreadAndProcessLock
 from arvados.keepcache.buffers import OpeningBuffer
 
@@ -43,6 +44,16 @@ class BlockStore(object):
         :type locator: str
         :return: the block else `None` if not found
         :rtype: Optional[bytearray]
+        """
+
+    @abstractmethod
+    def exists(self, locator):
+        """
+        Gets whether this block store contains a block with the given locator.
+        :param locator: the block locator
+        :type locator: str
+        :return: whether the block exists
+        :rtype: None
         """
 
     @abstractmethod
@@ -87,6 +98,9 @@ class InMemoryBlockStore(BlockStore):
     def __init__(self):
         super(InMemoryBlockStore, self).__init__()
         self._data = dict()  # type: Dict[str, bytearray]
+
+    def exists(self, locator):
+        return locator in self._data
 
     def get(self, locator):
         return self._data.get(locator, None)
@@ -175,38 +189,37 @@ class LMDBBlockStore(BlockStore):
         self._max_size = max_size
         self._transaction_lock = Lock()
 
-    def get(self, locator):
-        if not isinstance(locator, bytes):
-            locator = locator.encode()
-        _logger.debug("Getting value buffer for `%s` in LMDB" % locator)
-
+    def exists(self, locator):
+        locator = to_bytes(locator)
         with self._transaction_lock:
             with self._database.begin() as transaction:
-                # Checks if key exists - return `None` if it doesn't
-                cursor = transaction.cursor()
-                key_found = cursor.set_key(locator)
-                if not key_found:
-                    _logger.debug("No value for `%s` in LMDB" % locator)
-                    return None
+                with transaction.cursor() as cursor:
+                    return cursor.set_key(locator)
+
+    def get(self, locator):
+        _logger.debug("Getting value buffer for `%s` in LMDB" % locator)
+
+        if not self.exists(locator):
+            _logger.debug("No value for `%s` in LMDB" % locator)
+            return None
 
         content_buffer = OpeningBuffer(locator, self._database, self._transaction_lock)
         return content_buffer
 
     def put(self, locator, content):
-        if not isinstance(locator, bytes):
-            locator = locator.encode()
+        locator = to_bytes(locator)
         if not isinstance(content, bytearray):
             content = bytearray(content)
         _logger.debug("Putting value of %d bytes for `%s` in LMDB"
                       % (len(content), locator))
+
         # TODO: Transaction lock required for write transaction?
         with self._transaction_lock:
             with self._database.begin(write=True) as transaction:
                 transaction.put(locator, content)
 
     def delete(self, locator):
-        if not isinstance(locator, bytes):
-            locator = locator.encode()
+        locator = to_bytes(locator)
 
         _logger.debug("Deleting value for `%s` in LMDB" % locator)
         # TODO: Transaction lock required for write transaction?
@@ -267,6 +280,9 @@ class BookkeepingBlockStore(BlockStore):
         super(BookkeepingBlockStore, self).__init__()
         self._block_store = block_store
         self.bookkeeper = bookkeeper
+
+    def exists(self, locator):
+        return self._block_store.exists(locator)
 
     def get(self, locator):
         self.bookkeeper.record_get(locator)

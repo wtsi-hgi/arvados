@@ -10,7 +10,8 @@ from arvados.keepcache.block_store_bookkeepers import \
     BlockDeleteRecord
 from arvados.keepcache.block_stores import LMDBBlockStore, \
     InMemoryBlockStore, BookkeepingBlockStore
-from tests.keepcache._common import CONTENTS, LOCATOR_2, CACHE_SIZE, LOCATOR_1
+from tests.keepcache._common import CONTENTS, LOCATOR_2, CACHE_SIZE, LOCATOR_1, \
+    TempManager
 
 
 class _LazyCalculatedDict(UserDict):
@@ -49,18 +50,24 @@ class _TestBlockStore(unittest.TestCase):
         """
 
     def setUp(self):
-        self._temp_directories = []
+        self._temp_manager = TempManager()
         self.block_store, self.size = self._create_block_store()
 
     def tearDown(self):
-        for directory in self._temp_directories:
-            shutil.rmtree(directory)
+        self._temp_manager.remove_all()
 
-    def test_put_and_get(self):
+    def test_exists(self):
+        self.block_store.put(LOCATOR_1, CONTENTS)
+        self.assertTrue(self.block_store.exists(LOCATOR_1))
+
+    def test_exists_when_does_not_exist(self):
+        self.assertFalse(self.block_store.exists(LOCATOR_1))
+
+    def test_get(self):
         self.block_store.put(LOCATOR_1, CONTENTS)
         self.assertEqual(CONTENTS, self.block_store.get(LOCATOR_1))
 
-    def test_get_when_not_put(self):
+    def test_get_when_does_not_exist(self):
         self.assertIsNone(self.block_store.get(LOCATOR_1))
 
     def test_put_when_exists(self):
@@ -114,16 +121,6 @@ class _TestBlockStore(unittest.TestCase):
             assert deleted
             self.assertIsNone(self.block_store.get(LOCATOR_1))
 
-    def _create_temp_directory(self):
-        """
-        Creates a temporary directory that is deleted upon tear down.
-        :return: the temporary directory
-        :rtype: str
-        """
-        temp_directory = mkdtemp()
-        self._temp_directories.append(temp_directory)
-        return temp_directory
-
 
 class TestInMemoryBlockStore(_TestBlockStore):
     """
@@ -140,7 +137,7 @@ class TestLMDBBlockStore(_TestBlockStore):
     _MAX_READERS = 126
 
     def _create_block_store(self):
-        temp_directory = self._create_temp_directory()
+        temp_directory = self._temp_manager.create_directory()
         block_store = LMDBBlockStore(
             temp_directory, CACHE_SIZE, TestLMDBBlockStore._MAX_READERS)
         return block_store, block_store.calculate_usable_size()

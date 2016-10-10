@@ -55,7 +55,7 @@ class KeepBlockCache(object):
         Reserves a cache slot for the given locator or returns the existing slot
         associated with the locator.
 
-        Despite the name, this method does not reserve actual memory in the
+        Despite the name, this method does not reserve actual space in the
         cache.
         :param locator: the identifier of the entry in this cache
         :type locator: Union[str, unicode]

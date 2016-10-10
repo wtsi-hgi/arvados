@@ -9,7 +9,7 @@ from mock import MagicMock
 from arvados.keepcache.block_store_bookkeepers import \
     InMemoryBlockStoreBookkeeper, SqlBlockStoreBookkeeper, BlockGetRecord, \
     BlockDeleteRecord, BlockPutRecord
-from tests.keepcache._common import CONTENTS, LOCATORS
+from tests.keepcache._common import CONTENTS, LOCATORS, TempManager
 
 
 class _TestBlockStoreBookkeeper(unittest.TestCase):
@@ -196,18 +196,16 @@ class TestSqlBlockStoreBookkeeper(_TestBlockStoreBookkeeper):
     Tests for `SqlBlockStoreBookkeeper`.
     """
     def setUp(self):
-        self._temp_locations = []   # type: List[str]
+        self._temp_directory_manager = TempManager()
         super(TestSqlBlockStoreBookkeeper, self).setUp()
 
     def tearDown(self):
-        for location in self._temp_locations:
-            os.remove(location)
+        self._temp_directory_manager.remove_all()
 
     def _create_bookkeeper(self):
-        _, database_location = tempfile.mkstemp()
-        self._temp_locations.append(database_location)
+        database_location = self._temp_directory_manager.create_file()
         database_lock_location = "%s.lock" % database_location
-        self._temp_locations.append(database_lock_location)
+        self._temp_directory_manager.temp_files.append(database_lock_location)
         return SqlBlockStoreBookkeeper(
             "sqlite:///%s" % database_location, database_lock_location)
 
