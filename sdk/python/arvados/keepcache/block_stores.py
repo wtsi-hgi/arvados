@@ -133,8 +133,8 @@ class LMDBBlockStore(BlockStore):
     """
     _HEADER_SIZE = 16
 
-    def __init__(self, directory, max_size, max_readers=None,
-                 max_spare_transactions=None):
+    def __init__(self, directory, max_size, max_readers=126,
+                 max_spare_transactions=2):
         """
         Constructor.
         :param directory: the directory to use for the database (will create if
@@ -199,7 +199,7 @@ class LMDBBlockStore(BlockStore):
             content = bytearray(content)
         _logger.debug("Putting value of %d bytes for `%s` in LMDB"
                       % (len(content), locator))
-        # TODO: Not sure if transaction lock required for write transaction
+        # TODO: Transaction lock required for write transaction?
         with self._transaction_lock:
             with self._database.begin(write=True) as transaction:
                 transaction.put(locator, content)
@@ -209,7 +209,7 @@ class LMDBBlockStore(BlockStore):
             locator = locator.encode()
 
         _logger.debug("Deleting value for `%s` in LMDB" % locator)
-        # TODO: Not sure if transaction lock required for write transaction
+        # TODO: Transaction lock required for write transaction?
         with self._transaction_lock:
             with self._database.begin(write=True) as transaction:
                 deleted = transaction.delete(locator)

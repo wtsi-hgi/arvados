@@ -123,4 +123,4 @@ class OpeningBuffer(PseudoBuffer):
         """
         if buffer is None:
             raise RuntimeError("Value associated to `%s` is no longer in the "
-                               "database" % self.locatqor)
+                               "database" % self.locator)
