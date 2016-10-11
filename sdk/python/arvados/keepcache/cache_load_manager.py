@@ -79,7 +79,7 @@ class LMDBCacheLoadManager(CacheLoadManager):
     TODO
     """
     SUB_DATABASE_NAME = "cacheLoadManager"
-    DEFAULT_POLL_PERIOD = 0.5
+    DEFAULT_POLL_PERIOD = 1.0
 
     def __init__(self, directory, poll_period=DEFAULT_POLL_PERIOD):
         """
@@ -112,9 +112,10 @@ class LMDBCacheLoadManager(CacheLoadManager):
     def load_completed(self, locator):
         locator = to_bytes(locator)
         with self._lmdb_environment.begin(write=True, db=self._loading_database) as transaction:
-            deleted = transaction.delete(locator)
-            if not deleted:
-                raise ValueError("No reserve for locator `%s` found" % locator)
+            transaction.delete(locator)
+            # Not checking if deleted as may have been loaded faster by other
+            # process that did not wait for this one to finish and that may
+            # have already cleared the entry
 
     def wait_for_load(self, locator, timeout=float("inf")):
         waited_for = 0

@@ -539,7 +539,7 @@ class KeepClient(object):
     def __init__(self, api_client=None, proxy=None,
                  timeout=DEFAULT_TIMEOUT, proxy_timeout=DEFAULT_PROXY_TIMEOUT,
                  api_token=None, local_store=None, block_cache=None,
-                 num_retries=0, session=None):
+                 num_retries=0, session=None, cache_load_manager=None):
         """Initialize a new KeepClient.
 
         Arguments:
@@ -592,6 +592,9 @@ class KeepClient(object):
           The default number of times to retry failed requests.
           This will be used as the default num_retries value when get() and
           put() are called.  Default 0.
+
+        :cache_load_manager:
+          TODO
         """
         self.lock = threading.Lock()
         if proxy is None:
@@ -608,6 +611,7 @@ class KeepClient(object):
             local_store = os.environ.get('KEEP_LOCAL_STORE')
 
         self.block_cache = block_cache if block_cache else InMemoryKeepBlockCache()
+        self.cache_load_manager = cache_load_manager if cache_load_manager else None
         self.timeout = timeout
         self.proxy_timeout = proxy_timeout
         self._user_agent_pool = Queue.LifoQueue()
@@ -845,6 +849,33 @@ class KeepClient(object):
 
         self.misses_counter.add(1)
 
+        loading_for_others = False
+        if self.cache_load_manager is not None:
+            # TODO: Sort these out
+            MAX_TIMES_TO_WAIT_FOR_OTHER = 3
+            MAX_SECONDS_WAITING_FOR_OTHER = 60.0
+
+            wait_for_others = 0
+            while wait_for_others < MAX_TIMES_TO_WAIT_FOR_OTHER \
+                    and not loading_for_others:
+                if locator in self.cache_load_manager.pending_loads:
+                    # Another processes is already loading the block so waiting
+                    # for them to put it inot the cache
+                    loaded = self.cache_load_manager.wait_for_load(
+                        locator, timeout=MAX_SECONDS_WAITING_FOR_OTHER)
+                    if loaded:
+                        # Is is possible that the data is no longer in the
+                        # cache at this point!
+                        data = self.get_from_cache(locator)
+                        if data is not None:
+                            return data
+                    wait_for_others += 1
+                else:
+                    # Reserve rights to get!
+                    reserved = self.cache_load_manager.reserve_load(locator)
+                    if reserved:
+                        loading_for_others = True
+
         # If the locator has hints specifying a prefix (indicating a
         # remote keepproxy) or the UUID of a local gateway service,
         # read data from the indicated service(s) instead of the usual
@@ -899,6 +930,8 @@ class KeepClient(object):
         # Always cache the result, then return it if we succeeded.
         if method == "GET":
             slot.set(blob)
+            if loading_for_others:
+                self.cache_load_manager.load_completed(locator)
             self.block_cache.cap_cache()
         if loop.success():
             if method == "HEAD":
