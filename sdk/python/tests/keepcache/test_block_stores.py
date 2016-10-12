@@ -4,12 +4,17 @@ from UserDict import UserDict
 from abc import ABCMeta, abstractmethod
 from bisect import bisect_left
 from tempfile import mkdtemp
+from threading import Event
+from threading import Thread
+from time import sleep
+from types import MethodType
 
+from arvados.keepcache.block_load_managers import InMemoryBlockLoadManager
 from arvados.keepcache.block_store_bookkeepers import \
     InMemoryBlockStoreBookkeeper, BlockGetRecord, BlockPutRecord, \
     BlockDeleteRecord
 from arvados.keepcache.block_stores import LMDBBlockStore, \
-    InMemoryBlockStore, BookkeepingBlockStore
+    InMemoryBlockStore, BookkeepingBlockStore, LoadCommunicationBlockStore
 from tests.keepcache._common import CONTENTS, LOCATOR_2, CACHE_SIZE, LOCATOR_1, \
     TempManager
 
@@ -134,13 +139,87 @@ class TestLMDBBlockStore(_TestBlockStore):
     """
     Tests for `LMDBBlockStore`.
     """
-    _MAX_READERS = 126
-
     def _create_block_store(self):
         temp_directory = self._temp_manager.create_directory()
-        block_store = LMDBBlockStore(
-            temp_directory, CACHE_SIZE, TestLMDBBlockStore._MAX_READERS)
+        block_store = LMDBBlockStore(temp_directory, CACHE_SIZE)
         return block_store, block_store.calculate_usable_size()
+
+
+class TestLoadCommunicationBlockStore(_TestBlockStore):
+    """
+    Tests for `LoadCommunicationBlockStore`.
+    """
+    def test_get_waits_for_load(self):
+        block_load_manager = InMemoryBlockLoadManager(float("inf"))
+        block_store, _ = self._create_block_store_with_load_manager(
+            block_load_manager)
+        block_store.poll_period = 0.01
+
+        event = Event()
+        wait_for_get = self._wait_for_get(block_store, event, CONTENTS)
+
+        block_load_manager.reserve_load_rights(LOCATOR_1)
+
+        Thread(target=wait_for_get, args=(LOCATOR_1, )).start()
+        sleep(0.1)
+        self.assertFalse(event.is_set())
+
+        block_store.put(LOCATOR_1, CONTENTS)
+        block_load_manager.relinquish_load_rights(LOCATOR_1, complete=True)
+
+        get_complete = event.wait(timeout=10.0)
+        self.assertTrue(get_complete)
+
+    def test_get_can_timeout(self):
+        block_load_manager = InMemoryBlockLoadManager(0.1)
+        block_store, _ = self._create_block_store_with_load_manager(
+            block_load_manager)
+        block_store.poll_period = 0.01
+
+        block_load_manager.reserve_load_rights(LOCATOR_1)
+        self.assertIsNone(block_store.get(LOCATOR_1))
+
+    def test_methods_on_blockstore_but_not_on_interface_work(self):
+        block_load_manager = InMemoryBlockLoadManager(0.1)
+        underlying_block_store = InMemoryBlockStore()
+        underlying_block_store.method_outside_interface = MethodType(
+            lambda self: 3, underlying_block_store)
+        block_store = LoadCommunicationBlockStore(
+            underlying_block_store, block_load_manager)
+        self.assertEqual(3, block_store.method_outside_interface())
+
+    def _create_block_store(self):
+        block_load_manager = InMemoryBlockLoadManager(float("inf"))
+        return self._create_block_store_with_load_manager(block_load_manager)
+
+    def _create_block_store_with_load_manager(self, block_load_manager):
+        """
+        TODO
+        :param block_load_manager:
+        :return:
+        """
+        underlying_block_store = InMemoryBlockStore()
+        block_store = LoadCommunicationBlockStore(
+            underlying_block_store, block_load_manager)
+        return block_store, CACHE_SIZE
+
+    def _wait_for_get(self, block_store, event, assert_get_returns):
+        """
+        TODO
+        :param block_store: the block store
+        :type block_store: BlockStore
+        :param event: the event to set when the block has loaded
+        :type event: Event
+        :param assert_get_returns: TODO
+        :type assert_get_returns: TODO
+        :return: the wrapped function
+        :rtype: Callable[[str], None]
+        """
+        def wait_for_get(locator):
+            data = block_store.get(locator)
+            self.assertEqual(assert_get_returns, data)
+            event.set()
+        return wait_for_get
 
 
 class TestBookkeepingBlockStore(_TestBlockStore):

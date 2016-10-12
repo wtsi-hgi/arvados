@@ -74,7 +74,7 @@ class OpeningBuffer(PseudoBuffer):
         """
         Constructor.
         :param locator: locator holding the buffer
-        :type locator: str
+        :type locator: bytes
         :param database: TODO
         :type: Environment
         :param database_lock: TODO

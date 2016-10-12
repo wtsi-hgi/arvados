@@ -260,6 +260,7 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         while writing_locator_content:
             _logger.debug("Waiting for lock to write content for `%s` "
                           "(currently writing: %s)" % (locator, self._writing))
+            # TODO: Need to handle death of process holding this qwrite lock
             self._writing_lock.acquire()
             _logger.debug("Got lock to write to `%s`" % locator)
             writing_locator_content = locator in self._writing

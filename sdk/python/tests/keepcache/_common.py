@@ -1,3 +1,4 @@
+import atexit
 import os
 import shutil
 import tempfile
@@ -10,9 +11,30 @@ CONTENTS = bytearray(8 * 1024)
 LOCATORS = [LOCATOR_1, LOCATOR_2, "789"]
 
 
+def get_superclass(of_type, with_name):
+    """
+    TODO
+    :param of_type: TODO
+    :param with_name: TODO
+    :return: Optional[type]
+    """
+    if not isinstance(of_type, type):
+        raise ValueError("Not instance of `type`")
+    try:
+        mro = of_type.__mro__
+    except AttributeError:
+        raise ValueError("Type does not inherit from `object`")
+    for superclass in mro:
+        if superclass.__name__ == with_name:
+            return superclass
+    return None
+
+
 class TempManager:
     """
-    Manages temp files and directories.
+    Manages temp files and directories, ensuring they are removed on exit.
+
+    Not thread-safe.
     """
     def __init__(self):
         """
@@ -20,6 +42,7 @@ class TempManager:
         """
         self.temp_directories = []
         self.temp_files = []
+        atexit.register(self.remove_all)
 
     def create_directory(self):
         """
@@ -52,7 +75,8 @@ class TempManager:
         """
         Removes all managed temp directories (if they still exist).
         """
-        for directory in self.temp_directories:
+        while len(self.temp_directories) > 0:
+            directory = self.temp_directories.pop(0)
             if os.path.isdir(directory):
                 try:
                     shutil.rmtree(directory)
@@ -63,7 +87,8 @@ class TempManager:
         """
         Removes all managed temp files (if they still exist).
         """
-        for file in self.temp_files:
+        while len(self.temp_files) > 0:
+            file = self.temp_files.pop(0)
             if os.path.exists(file):
                 try:
                     os.remove(file)

@@ -4,6 +4,7 @@ from abc import ABCMeta, abstractmethod
 from errno import EEXIST
 from math import ceil
 from threading import Lock
+from time import sleep
 
 import lmdb
 
@@ -37,16 +38,6 @@ class BlockStore(object):
         return self._exclusive_write_access
 
     @abstractmethod
-    def get(self, locator):
-        """
-        Gets the block with the given locator from this store.
-        :param locator: the identifier of the block to get
-        :type locator: str
-        :return: the block else `None` if not found
-        :rtype: Optional[bytearray]
-        """
-
-    @abstractmethod
     def exists(self, locator):
         """
         Gets whether this block store contains a block with the given locator.
@@ -54,6 +45,16 @@ class BlockStore(object):
         :type locator: str
         :return: whether the block exists
         :rtype: None
+        """
+
+    @abstractmethod
+    def get(self, locator):
+        """
+        Gets the block with the given locator from this store.
+        :param locator: the identifier of the block to get
+        :type locator: str
+        :return: the block else `None` if not found
+        :rtype: Optional[bytearray]
         """
 
     @abstractmethod
@@ -147,6 +148,7 @@ class LMDBBlockStore(BlockStore):
     """
     _HEADER_SIZE = 16
 
+    # FIXME: Just accept LMDB database
     def __init__(self, directory, max_size, max_readers=126,
                  max_spare_transactions=2):
         """
@@ -175,8 +177,8 @@ class LMDBBlockStore(BlockStore):
             try:
                 os.mkdir(directory)
             except OSError as e:
-                # In Python 3 (i.e. the current version of Python as of the last ~8 years)
-                # we could just use `FileExistsError`...
+                # In Python 3 (i.e. the current version of Python as of the
+                # last ~8 years) we could just use `FileExistsError`...
                 if e.errno != EEXIST:
                     raise e
 
@@ -203,7 +205,8 @@ class LMDBBlockStore(BlockStore):
             _logger.debug("No value for `%s` in LMDB" % locator)
             return None
 
-        content_buffer = OpeningBuffer(locator, self._database, self._transaction_lock)
+        content_buffer = OpeningBuffer(
+            to_bytes(locator), self._database, self._transaction_lock)
         return content_buffer
 
     def put(self, locator, content):
@@ -262,6 +265,77 @@ class LMDBBlockStore(BlockStore):
         :rtype: int
         """
         return self._database.stat()["psize"]
+
+
+class LoadCommunicationBlockStore(BlockStore):
+    """
+    Block store where communication of block loads is shared across accessors
+    to the block store.
+    """
+    DEFAULT_POLL_PERIOD = 0.5
+
+    def __init__(self, block_store, block_load_manager,
+                 poll_period=DEFAULT_POLL_PERIOD):
+        """
+        Constructor.
+        :param block_store: the block store on which load communications are
+        enabled
+        :type block_store: BlockStore
+        :param block_load_manager: manages what processes are loading what
+        blocks
+        :type block_load_manager: BlockLoadManager
+        :param poll_period: the poll period used when checking if data is in
+        the block store
+        :type poll_period: float
+        """
+        super(LoadCommunicationBlockStore, self).__init__()
+        self._block_store = block_store
+        self._block_load_manager = block_load_manager
+        self.poll_period = poll_period
+
+    def __getattr__(self, name):
+        return self._block_store.__getattribute__(name)
+
+    def delete(self, locator):
+        return self._block_store.delete(locator)
+
+    def exists(self, locator):
+        return self._block_store.exists(locator)
+
+    def get(self, locator):
+        data = self._block_store.get(locator)
+        if data is None and locator in self._block_load_manager.pending:
+            self._wait_for_load(locator)
+            data = self._block_store.get(locator)
+        return data
+
+    def put(self, locator, content):
+        return self._block_store.put(locator, content)
+
+    def _wait_for_load(self, locator):
+        """
+        Waits for the block with the given locator to be loaded into the block
+        store. The block store is therefore responsible for timeouts.
+
+        Beware that on return there is no guarantee that a block will be in the
+        store.
+        :param locator: the block locator
+        :type locator: str
+        """
+        _logger.info(
+            "Waiting for other process to load block associated with "
+            "locator `%s`" % locator)
+        while True:
+            if self._block_store.exists(locator):
+                _logger.info("Other processes has loaded block associated "
+                             "with locator `%s`" % locator)
+                break
+            elif locator not in self._block_load_manager.pending:
+                _logger.info("No longer anyone loading content for locator "
+                             "`%s`" % locator)
+                break
+            else:
+                sleep(self.poll_period)
 
 
 class BookkeepingBlockStore(BlockStore):
