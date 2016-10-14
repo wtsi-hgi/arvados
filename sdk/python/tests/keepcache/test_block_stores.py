@@ -165,7 +165,7 @@ class TestLoadCommunicationBlockStore(_TestBlockStore):
         self.assertFalse(event.is_set())
 
         block_store.put(LOCATOR_1, CONTENTS)
-        block_load_manager.relinquish_load_rights(LOCATOR_1, complete=True)
+        block_load_manager.relinquish_load_rights(LOCATOR_1)
 
         get_complete = event.wait(timeout=10.0)
         self.assertTrue(get_complete)

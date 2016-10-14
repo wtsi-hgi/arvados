@@ -28,18 +28,17 @@ class _TestBlockLoadManager(unittest.TestCase):
         self.block_load_manager = self._create_block_load_manager()
 
     def test_reserve_load_rights_when_not_reserved(self):
-        reserved = self.block_load_manager.reserve_load_rights(LOCATOR_1)
-        self.assertTrue(reserved)
+        reserve_id = self.block_load_manager.reserve_load_rights(LOCATOR_1)
+        self.assertIsNotNone(reserve_id)
 
     def test_reserve_load_rights_when_already_reserved(self):
         self.block_load_manager.reserve_load_rights(LOCATOR_1)
-        reserved = self.block_load_manager.reserve_load_rights(LOCATOR_1)
-        self.assertFalse(reserved)
+        reserved_id = self.block_load_manager.reserve_load_rights(LOCATOR_1)
+        self.assertIsNone(reserved_id)
 
     def test_relinquish_load_rights(self):
-        self.block_load_manager.reserve_load_rights(LOCATOR_1)
-        assert LOCATOR_1 in self.block_load_manager.pending
-        self.block_load_manager.relinquish_load_rights(LOCATOR_1)
+        reserved_id = self.block_load_manager.reserve_load_rights(LOCATOR_1)
+        self.block_load_manager.relinquish_load_rights(reserved_id)
         self.assertNotIn(LOCATOR_1, self.block_load_manager.pending)
 
     def test_pending(self):
@@ -93,7 +92,7 @@ class _TestMultiProcessSafeBlockLoadManager(_TestBlockLoadManager):
         self.block_load_manager_1.get_time = lambda: 11.0
 
         self.assertNotIn(LOCATOR_1, self.block_load_manager_1.pending)
-        self.assertIn(LOCATOR_1, self.block_load_manager_1._get_pending_loads())
+        self.assertIn(LOCATOR_1, self.block_load_manager_1._read_load_rights().keys())
 
     def test_pending_with_global_timeout(self):
         self.block_load_manager_2.timeout = 1.0
@@ -106,7 +105,7 @@ class _TestMultiProcessSafeBlockLoadManager(_TestBlockLoadManager):
         self.block_load_manager_1.get_time = lambda: 11.0
 
         self.assertNotIn(LOCATOR_1, self.block_load_manager_1.pending)
-        self.assertNotIn(LOCATOR_1, self.block_load_manager_1._get_pending_loads())
+        self.assertNotIn(LOCATOR_1, self.block_load_manager_1._read_load_rights().keys())
 
 
 class TestInMemoryBlockLoadManager(_TestBlockLoadManager):
