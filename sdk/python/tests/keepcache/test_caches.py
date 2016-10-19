@@ -106,40 +106,6 @@ class TestBlockStoreBackedKeepBlockCache(_TestKeepBlockCache):
         slot, _ = self.cache.reserve_cache(LOCATOR_1)
         self.assertRaises(ValueError, slot.set, bytearray(CACHE_SIZE + 1))
 
-    def test_concurrent_set_for_same_locator(self):
-        puts = []
-        puts_lock = Lock()
-        continue_lock = Lock()
-        continue_lock.acquire()
-        continued = Semaphore(0)
-        original_put = self.cache.block_store.put
-
-        def pause_put(*args, **kwargs):
-            # The joys of using a version of Python that was outmoded in 2008...
-            # http://stackoverflow.com/questions/3190706/nonlocal-keyword-in-python-2-x
-            with puts_lock:
-                puts.append(True)
-                pause = len(puts) == 1
-            if pause:
-                continue_lock.acquire()
-            original_put(*args, **kwargs)
-            continued.release()
-
-        self.cache.block_store.put = MagicMock(side_effect=pause_put)
-
-        slot_1, _ = self.cache.reserve_cache(LOCATOR_1)
-        slot_2, _ = self.cache.reserve_cache(LOCATOR_2)
-        Thread(target=slot_1.set, args=(bytearray(1),)).start()
-        Thread(target=slot_1.set, args=(bytearray(2),)).start()
-        Thread(target=slot_2.set, args=(bytearray(3),)).start()
-        continue_lock.release()
-
-        while len(puts) != 3:
-            continued.acquire()
-        self.assertEqual(bytearray(3), slot_2.content)
-        # No guarantees on value of slot contents after race condition!
-        self.assertLessEqual(len(slot_1.content), 2)
-
     def _create_cache(self, cache_size):
         block_store = BookkeepingBlockStore(
             InMemoryBlockStore(),

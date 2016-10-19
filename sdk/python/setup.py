@@ -55,7 +55,8 @@ setup(name='arvados-python-client',
           'lmdb',
           'sqlalchemy==1.0.14',
           'filelock==2.0.6',
-          'monotonic==1.2'
+          'monotonic==1.2',
+          'bidict'
       ],
       test_suite='tests',
       tests_require=['pbr<1.7.0', 'mock>=1.0', 'PyYAML'],

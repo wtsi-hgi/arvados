@@ -7,6 +7,7 @@ from collections import OrderedDict
 from copy import copy
 from threading import RLock
 
+import lmdb
 from bidict import bidict
 from monotonic import monotonic
 
@@ -57,9 +58,10 @@ class BlockLoadManager(object):
     def __init__(self, global_timeout_manager, timeout=float("inf")):
         """
         Constructor.
-        :param global_timeout_manager: TODO
+        :param global_timeout_manager: manager of global load timeouts
         :type global_timeout_manager: ValueManager
-        :param timeout: TODO
+        :param timeout: the number of seconds before a load is considered to
+        have timed out
         :type timeout: float
         """
         self.identifier = "%s-%s-%s" % (os.getpid(),
@@ -214,10 +216,10 @@ class LMDBBlockLoadManager(BlockLoadManager):
         :type database: str
         :param timeout: TODO
         """
-        self._environment = environment
-        self._database = environment.open_db(database) if isinstance(database, str) else None
-        timeout_database = environment.open_db(LMDBBlockLoadManager._GLOBAL_TIMEOUT_DATABASE)
-        global_timeout_manager = LMDBValueManager(environment, timeout_database)
+        self._environment = lmdb.open(environment, max_dbs=2) if not isinstance(environment, lmdb.Environment) else environment
+        self._database = self._environment.open_db(database) if isinstance(database, str) else database
+        timeout_database = self._environment.open_db(LMDBBlockLoadManager._GLOBAL_TIMEOUT_DATABASE)
+        global_timeout_manager = LMDBValueManager(self._environment, timeout_database)
         super(LMDBBlockLoadManager, self).__init__(global_timeout_manager, timeout)
 
     def relinquish_load_rights(self, identifier):

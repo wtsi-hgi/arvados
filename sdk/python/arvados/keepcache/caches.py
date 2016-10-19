@@ -52,15 +52,15 @@ class KeepBlockCache(object):
     @abstractmethod
     def reserve_cache(self, locator):
         """
-        Reserves a cache slot for the given locator or returns the existing slot
-        associated with the locator.
+        Reserves a cache slot for the given locator or returns the existing
+        slot associated with the locator.
 
         Despite the name, this method does not reserve actual space in the
         cache.
         :param locator: the identifier of the entry in this cache
         :type locator: Union[str, unicode]
-        :return: a tuple containing the reserved cache slot as the first element
-        and whether the slot was newly created as the second element
+        :return: a tuple containing the reserved cache slot as the first
+        element and whether the slot was newly created as the second element
         :rtype: Tuple[CacheSlot, bool]
         """
 
@@ -260,12 +260,13 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         while writing_locator_content:
             _logger.debug("Waiting for lock to write content for `%s` "
                           "(currently writing: %s)" % (locator, self._writing))
-            # TODO: Need to handle death of process holding this qwrite lock
+            # TODO: Need to handle death of process holding this write lock
             self._writing_lock.acquire()
             _logger.debug("Got lock to write to `%s`" % locator)
             writing_locator_content = locator in self._writing
             if not writing_locator_content:
-                if str(self._get_content(locator)) == content:
+                if self.block_store.exists(locator):
+                    # XXX: Ignoring the possibility of hash collisions
                     _logger.debug("Content for `%s` already written" % locator)
                     self._writing_lock.release()
                     return
