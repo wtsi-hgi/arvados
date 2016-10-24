@@ -9,7 +9,7 @@ from time import sleep
 import lmdb
 
 from arvados.keepcache._common import to_bytes
-from arvados.keepcache._locks import ThreadAndProcessLock
+from arvados.keepcache._locks import GlobalLock
 from arvados.keepcache.buffers import OpeningBuffer
 
 _logger = logging.getLogger(__name__)
@@ -182,7 +182,7 @@ class LMDBBlockStore(BlockStore):
                 if e.errno != EEXIST:
                     raise e
 
-        self._exclusive_write_access = ThreadAndProcessLock(
+        self._exclusive_write_access = GlobalLock(
             os.path.join(directory, "access.lock"))
         with self._exclusive_write_access:
             self._database = lmdb.open(

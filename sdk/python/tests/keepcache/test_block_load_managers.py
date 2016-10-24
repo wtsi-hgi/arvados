@@ -151,11 +151,6 @@ class TestLMDBBlockLoadManager(_TestMultiProcessSafeBlockLoadManager):
         return block_manager
 
 
-
 # Stop unittest from trying to instantiate the abstract base classes as a tests
 del _TestBlockLoadManager
 del _TestMultiProcessSafeBlockLoadManager
-
-
-if __name__ == "__main__":
-    unittest.main()

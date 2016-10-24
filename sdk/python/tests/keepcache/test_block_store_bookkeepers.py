@@ -1,9 +1,7 @@
-import os
-import tempfile
 import unittest
 from abc import ABCMeta, abstractmethod
-
 from datetime import datetime
+
 from mock import MagicMock
 
 from arvados.keepcache.block_store_bookkeepers import \

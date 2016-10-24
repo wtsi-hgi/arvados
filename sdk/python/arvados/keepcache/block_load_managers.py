@@ -28,8 +28,8 @@ class BlockLoadManager(object):
     def relinquish_load_rights(self, identifier):
         """
         Relinquishes the rights (if any) corresponding to the given identifier.
-        :param locator: the load identifier
-        :type locator: str
+        :param identifier: the load identifier
+        :type identifier: str
         """
 
     @abstractmethod
@@ -39,7 +39,7 @@ class BlockLoadManager(object):
         store. The return value indicates whether the rights were granted.
         :param locator: the locator of the block to be loaded
         :type locator: str
-        :param identifier: TODO
+        :param identifier: identifier of block loader
         :type identifier: str
         :return: `True` if exclusive rights were given to load block, else
         `False` if another has already gained the rights
@@ -76,7 +76,17 @@ class BlockLoadManager(object):
         """
         Destructor.
         """
-        self._global_timeout_manager.remove_value(self.identifier)
+        # Beware of:
+        # http://www.algorithm.co.il/blogs/programming/python-gotchas-1-__del__-is-not-the-opposite-of-__init__/
+        try:
+            # XXX: If this fails, stalled loads are potentially not going to be
+            # removed from the global pending list. Every load manager will
+            # then have to wait for their `timeout` for all stalled loads. The
+            # negative impact could be reduced by switching to the use of
+            # timestamps and assuming synchronised clocks.
+            self._global_timeout_manager.remove_value(self.identifier)
+        except AttributeError:
+            pass
 
     @property
     def pending(self):
@@ -103,16 +113,20 @@ class BlockLoadManager(object):
     @property
     def global_timeout(self):
         """
-        TODO
-        :return:
+        Gets the global timeout, defined as the longest timeout of any
+        block load manager using the same data source.
+        :return: global timeout in seconds
+        :rtype: float
         """
         return self._global_timeout_manager.get_highest_value()
 
     @property
     def timeout(self):
         """
-        TODO
-        :return:
+        Gets the timeout this block load manager uses to decide if the process
+        currently listed as loading a block has timed out.
+        :return: the timeout in seconds
+        :rtype: float
         """
         return self._timeout
 
@@ -128,10 +142,12 @@ class BlockLoadManager(object):
 
     def reserve_load_rights(self, locator):
         """
-        TODO
-        :param locator:
+        Reserves the right for this block load manager to load the block with
+        the given locator.
+        :param locator: the locator of the block to load
         :type locator: str
-        :return:
+        :return: `True` if this load manager has been given the rights to load
+        the block, else `False` if the block is to be loaded by another
         :rtype: Optional[str]
         """
         identifier = "%d-%s" % (os.getpid(), uuid.uuid4())
@@ -150,7 +166,10 @@ class BlockLoadManager(object):
 
     def _remove_timed_out_loads(self):
         """
-        TODO
+        Removes loads from `self._dated_pending_loads` that are considered to
+        have timed out. If the timeout used by this block load manager is the
+        highest of all load managers, the loads rights are removed from the
+        current loader.
         """
         current_time = self.get_time()
         global_timeout = self.global_timeout
@@ -181,7 +200,8 @@ class InMemoryBlockLoadManager(BlockLoadManager):
         :type timeout: float
         """
         global_timeout_manager = InMemoryValueManager()
-        super(InMemoryBlockLoadManager, self).__init__(global_timeout_manager, timeout)
+        super(InMemoryBlockLoadManager, self).__init__(
+            global_timeout_manager, timeout)
         self._pending = bidict()
         self._pending_lock = RLock()
 
@@ -204,17 +224,24 @@ class InMemoryBlockLoadManager(BlockLoadManager):
 
 class LMDBBlockLoadManager(BlockLoadManager):
     """
-    TODO
+    LMDB backed block load manager.
+
+    This can be setup to work across multiple processes.
     """
     _GLOBAL_TIMEOUT_DATABASE = "GlobalTimeout"
 
     def __init__(self, environment, database=None, timeout=float("inf")):
         """
         Constructor.
-        :param environment: TODO
-        :param database: TODO. Must not have any sub-databases
-        :type database: str
-        :param timeout: TODO
+        :param environment: the LMDB environment or path to the environment
+        directory. If the former is given, it must be opened with support for 2
+        databases
+        :type environment: Union[Environment, str]
+        :param database: the database to use
+        :type database: Union[handle, str]
+        :param timeout: the time in seconds before it is considered that a
+        process loading a block has stopped
+        :type timeout: float
         """
         self._environment = lmdb.open(environment, max_dbs=2) if not isinstance(environment, lmdb.Environment) else environment
         self._database = self._environment.open_db(database) if isinstance(database, str) else database

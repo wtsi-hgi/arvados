@@ -1,11 +1,8 @@
-import shutil
 import unittest
 from UserDict import UserDict
 from abc import ABCMeta, abstractmethod
 from bisect import bisect_left
-from tempfile import mkdtemp
-from threading import Event
-from threading import Thread
+from threading import Event, Thread
 from time import sleep
 from types import MethodType
 
@@ -15,8 +12,8 @@ from arvados.keepcache.block_store_bookkeepers import \
     BlockDeleteRecord
 from arvados.keepcache.block_stores import LMDBBlockStore, \
     InMemoryBlockStore, BookkeepingBlockStore, LoadCommunicationBlockStore
-from tests.keepcache._common import CONTENTS, LOCATOR_2, CACHE_SIZE, LOCATOR_1, \
-    TempManager
+from tests.keepcache._common import CONTENTS, LOCATOR_2, CACHE_SIZE, \
+    LOCATOR_1, TempManager
 
 
 class _LazyCalculatedDict(UserDict):
@@ -194,9 +191,12 @@ class TestLoadCommunicationBlockStore(_TestBlockStore):
 
     def _create_block_store_with_load_manager(self, block_load_manager):
         """
-        TODO
-        :param block_load_manager:
-        :return:
+        Creates a block store with the given block load manager.
+        :param block_load_manager: the block load manager
+        :type block_load_manager: BlockLoadManager
+        :return: tuple where the first element is the created block store and
+        the second is its maximum size in bytes
+        :rtype: Tuple[BlockStore, int]
         """
         underlying_block_store = InMemoryBlockStore()
         block_store = LoadCommunicationBlockStore(
@@ -205,13 +205,15 @@ class TestLoadCommunicationBlockStore(_TestBlockStore):
 
     def _wait_for_get(self, block_store, event, assert_get_returns):
         """
-        TODO
+        Creates a function that waits for the block with a given locator to be
+        loaded from the given block store, before asserting the returned data
+        equals that given and then setting the given even.
         :param block_store: the block store
         :type block_store: BlockStore
         :param event: the event to set when the block has loaded
         :type event: Event
-        :param assert_get_returns: TODO
-        :type assert_get_returns: TODO
+        :param assert_get_returns: the expected returned data
+        :type assert_get_returns: Any
         :return: the wrapped function
         :rtype: Callable[[str], None]
         """

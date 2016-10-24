@@ -85,7 +85,3 @@ class TestLMDBValueManager(_TestValueManager):
 
 # Stop unittest from trying to instantiate the abstract base class as a test
 del _TestValueManager
-
-
-if __name__ == "__main__":
-    unittest.main()

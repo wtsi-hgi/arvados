@@ -5,7 +5,7 @@ from arvados.keepcache._common import to_bytes
 
 class ValueManager(object):
     """
-    TODO
+    Manages a set of values.
     """
     __metaclass__ = ABCMeta
 
@@ -73,11 +73,11 @@ class LMDBValueManager(ValueManager):
     """
     def __init__(self, environment, database=None):
         """
-        TODO
-        :param environment:
-        :type environment: TODO
-        :param database:
-        :type database: TODO: Optional[Union[handle, str]]
+        Constructor.
+        :param environment: the LMDB environment
+        :type environment: Environment
+        :param database: the LMDB sub-database to use (if any)
+        :type database: Optional[Union[handle, str]]
         """
         self._environment = environment
         self._database_handle = environment.open(database) \

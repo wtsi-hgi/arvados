@@ -13,10 +13,13 @@ LOCATORS = [LOCATOR_1, LOCATOR_2, "789"]
 
 def get_superclass(of_type, with_name):
     """
-    TODO
-    :param of_type: TODO
-    :param with_name: TODO
-    :return: Optional[type]
+    Gets the superclass of the given type, which has the given name.
+    :param of_type: the class
+    :type of_type: type
+    :param with_name: the name of the superclass that is to be returned
+    :type with_name: str
+    :return: the found class else `None` if no superclass has the given name
+    :rtype: Optional[type]
     """
     if not isinstance(of_type, type):
         raise ValueError("Not instance of `type`")

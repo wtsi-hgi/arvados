@@ -3,23 +3,30 @@ from threading import Lock
 from filelock import FileLock
 
 
-class ThreadAndProcessLock(object):
+class GlobalLock(object):
     """
-    TODO
+    Lock that applies across processes.
     """
     def __init__(self, location):
         """
-        TODO
-        :param location:
+        Constructor.
+        :param location: location of the lock file
+        :type location: str
         """
         self._file_lock = FileLock(location)
         self._thread_lock = Lock()
 
     def acquire(self):
+        """
+        Acquires the lock.
+        """
         self._thread_lock.acquire()
         self._file_lock.acquire()
 
     def release(self):
+        """
+        Releases the lock.
+        """
         self._file_lock.release()
         self._thread_lock.release()
 

@@ -1,7 +1,6 @@
 from abc import ABCMeta, abstractmethod, abstractproperty
 from collections import defaultdict
 from datetime import datetime
-from threading import Lock
 
 from sqlalchemy import Column, String, Integer, create_engine, DateTime, \
     TypeDecorator
@@ -10,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.sql import func
 from sqlalchemy.sql.elements import or_
 
-from arvados.keepcache._locks import ThreadAndProcessLock
+from arvados.keepcache._locks import GlobalLock
 
 
 class BlockRecord(object):
@@ -341,7 +340,7 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
         self._engine = create_engine(database_location)
         SqlBlockStoreBookkeeper._SQLAlchemyModel.metadata.create_all(
             bind=self._engine)
-        self._write_lock = ThreadAndProcessLock(write_lock_location) if write_lock_location else None
+        self._write_lock = GlobalLock(write_lock_location) if write_lock_location else None
 
     def get_active(self):
         PutRecord = SqlBlockStoreBookkeeper._SqlAlchemyBlockPutRecord
