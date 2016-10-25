@@ -408,7 +408,7 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
 
     def _create_session(self):
         """
-        Creates SQLAlchmeny session.
+        Creates SQLAlchemy session.
         :return: SQLAlchemy session
         """
         Session = sessionmaker(bind=self._engine)

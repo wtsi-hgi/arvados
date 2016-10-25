@@ -155,14 +155,14 @@ class TestLoadCommunicationBlockStore(_TestBlockStore):
         event = Event()
         wait_for_get = self._wait_for_get(block_store, event, CONTENTS)
 
-        block_load_manager.reserve_load_rights(LOCATOR_1)
+        timestamp = block_load_manager.reserve_load_rights(LOCATOR_1)
 
         Thread(target=wait_for_get, args=(LOCATOR_1, )).start()
         sleep(0.1)
         self.assertFalse(event.is_set())
 
         block_store.put(LOCATOR_1, CONTENTS)
-        block_load_manager.relinquish_load_rights(LOCATOR_1)
+        block_load_manager.relinquish_load_rights(LOCATOR_1, timestamp)
 
         get_complete = event.wait(timeout=10.0)
         self.assertTrue(get_complete)

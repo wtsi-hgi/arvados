@@ -33,7 +33,7 @@ def get_superclass(of_type, with_name):
     return None
 
 
-class TempManager:
+class TempManager(object):
     """
     Manages temp files and directories, ensuring they are removed on exit.
 

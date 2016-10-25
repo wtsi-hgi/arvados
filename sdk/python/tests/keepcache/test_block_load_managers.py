@@ -28,17 +28,17 @@ class _TestBlockLoadManager(unittest.TestCase):
         self.block_load_manager = self._create_block_load_manager()
 
     def test_reserve_load_rights_when_not_reserved(self):
-        reserve_id = self.block_load_manager.reserve_load_rights(LOCATOR_1)
-        self.assertIsNotNone(reserve_id)
+        timestamp = self.block_load_manager.reserve_load_rights(LOCATOR_1)
+        self.assertIsNotNone(timestamp)
 
     def test_reserve_load_rights_when_already_reserved(self):
         self.block_load_manager.reserve_load_rights(LOCATOR_1)
-        reserved_id = self.block_load_manager.reserve_load_rights(LOCATOR_1)
-        self.assertIsNone(reserved_id)
+        timestamp = self.block_load_manager.reserve_load_rights(LOCATOR_1)
+        self.assertIsNone(timestamp)
 
     def test_relinquish_load_rights(self):
-        reserved_id = self.block_load_manager.reserve_load_rights(LOCATOR_1)
-        self.block_load_manager.relinquish_load_rights(reserved_id)
+        timestamp = self.block_load_manager.reserve_load_rights(LOCATOR_1)
+        self.block_load_manager.relinquish_load_rights(LOCATOR_1, timestamp)
         self.assertNotIn(LOCATOR_1, self.block_load_manager.pending)
 
     def test_pending(self):
@@ -75,34 +75,34 @@ class _TestMultiProcessSafeBlockLoadManager(_TestBlockLoadManager):
             self.block_load_manager_1)
 
     def test_set_global_timeout(self):
-        max_load_timeout = 10.0
+        max_load_timeout = 10
         self.block_load_manager_1.timeout = max_load_timeout / 2
         self.block_load_manager_2.timeout = max_load_timeout
         self.assertEqual(max_load_timeout, self.block_load_manager_1.global_timeout)
         self.assertEqual(max_load_timeout, self.block_load_manager_1.global_timeout)
 
     def test_pending_with_local_timeout(self):
-        self.block_load_manager_2.timeout = 100.0
-        self.block_load_manager_1.timeout = 10.0
+        self.block_load_manager_2.timeout = 100
+        self.block_load_manager_1.timeout = 10
 
-        self.block_load_manager_1.get_time = lambda: 0.0
+        self.block_load_manager_1.get_time = lambda: 0
         self.block_load_manager_1.reserve_load_rights(LOCATOR_1)
-        self.block_load_manager_1.get_time = lambda: 9.0
+        self.block_load_manager_1.get_time = lambda: 9
         self.assertIn(LOCATOR_1, self.block_load_manager_1.pending)
-        self.block_load_manager_1.get_time = lambda: 11.0
+        self.block_load_manager_1.get_time = lambda: 11
 
         self.assertNotIn(LOCATOR_1, self.block_load_manager_1.pending)
         self.assertIn(LOCATOR_1, self.block_load_manager_1._read_load_rights().keys())
 
     def test_pending_with_global_timeout(self):
-        self.block_load_manager_2.timeout = 1.0
-        self.block_load_manager_1.timeout = 10.0
+        self.block_load_manager_2.timeout = 1
+        self.block_load_manager_1.timeout = 10
 
-        self.block_load_manager_1.get_time = lambda: 0.0
+        self.block_load_manager_1.get_time = lambda: 0
         self.block_load_manager_1.reserve_load_rights(LOCATOR_1)
-        self.block_load_manager_1.get_time = lambda: 9.0
+        self.block_load_manager_1.get_time = lambda: 9
         self.assertIn(LOCATOR_1, self.block_load_manager_1.pending)
-        self.block_load_manager_1.get_time = lambda: 11.0
+        self.block_load_manager_1.get_time = lambda: 11
 
         self.assertNotIn(LOCATOR_1, self.block_load_manager_1.pending)
         self.assertNotIn(LOCATOR_1, self.block_load_manager_1._read_load_rights().keys())

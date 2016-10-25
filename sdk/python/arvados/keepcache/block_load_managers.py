@@ -1,15 +1,12 @@
 import logging
 import os
-import threading
+import time
 import uuid
 from abc import ABCMeta, abstractmethod
-from collections import OrderedDict
 from copy import copy
 from threading import RLock
 
 import lmdb
-from bidict import bidict
-from monotonic import monotonic
 
 from arvados.keepcache._common import to_bytes
 from arvados.keepcache._value_managers import InMemoryValueManager, \
@@ -25,34 +22,32 @@ class BlockLoadManager(object):
     __metaclass__ = ABCMeta
 
     @abstractmethod
-    def relinquish_load_rights(self, identifier):
+    def relinquish_load_rights(self, locator, timestamp):
         """
-        Relinquishes the rights (if any) corresponding to the given identifier.
-        :param identifier: the load identifier
-        :type identifier: str
+        Relinquishes the rights (if any) of the loader for the given locator,
+        started at the given timestamp.
         """
 
     @abstractmethod
-    def _reserve_load_rights(self, locator, identifier):
+    def _reserve_load_rights(self, locator, timestamp):
         """
         Reserves exclusive rights to load the given locator into the block
         store. The return value indicates whether the rights were granted.
         :param locator: the locator of the block to be loaded
         :type locator: str
-        :param identifier: identifier of block loader
-        :type identifier: str
-        :return: `True` if exclusive rights were given to load block, else
-        `False` if another has already gained the rights
-        :rtype: bool
+        :param timestamp: time when load was started in milliseconds from epoch
+        :type timestamp: int
+        :return: timestamp of the reserve else `None` if not reserved
+        :rtype: Optional[float]
         """
 
     @abstractmethod
     def _read_load_rights(self):
         """
         Gets the loads rights that are currently active.
-        :return: identifiers of loaders, indexed by the locator they are
-        loading
-        :rtype: Dict[str, str]
+        :return: dictionary indexed by locator of the timestamps of when rights
+        were granted
+        :rtype: Dict[str, int]
         """
 
     def __init__(self, global_timeout_manager, timeout=float("inf")):
@@ -64,13 +59,10 @@ class BlockLoadManager(object):
         have timed out
         :type timeout: float
         """
-        self.identifier = "%s-%s-%s" % (os.getpid(),
-                                        threading.current_thread(),
-                                        str(uuid.uuid4()))
+        self.identifier = "%s-%s" % (os.getpid(), str(uuid.uuid4()))
         self._global_timeout_manager = global_timeout_manager
         self._timeout = None
         self.timeout = timeout
-        self._dated_pending_loads = OrderedDict()  # type: OrderedDict[str, Tuple[str, int]]
 
     def __del__(self):
         """
@@ -79,36 +71,30 @@ class BlockLoadManager(object):
         # Beware of:
         # http://www.algorithm.co.il/blogs/programming/python-gotchas-1-__del__-is-not-the-opposite-of-__init__/
         try:
-            # XXX: If this fails, stalled loads are potentially not going to be
-            # removed from the global pending list. Every load manager will
-            # then have to wait for their `timeout` for all stalled loads. The
-            # negative impact could be reduced by switching to the use of
-            # timestamps and assuming synchronised clocks.
             self._global_timeout_manager.remove_value(self.identifier)
         except AttributeError:
-            pass
+            """ The constructor did not complete """
 
     @property
     def pending(self):
         """
         Gets the set of block loads that are still valid and pending
-        completion. Use of this accessor triggers management of the global
-        reseve table (old reservations may be removed)
+        completion. Use of this accessor triggers management of the pending
+        list (old rights may be removed).
         :return: the loads that are pending
-        :rtype: Iterable[str]
+        :rtype: Set[str]
         """
         pending = self._read_load_rights()
-        # Adds new load identifiers
-        for locator, identifier in pending.iteritems():
-            if identifier not in self._dated_pending_loads:
-                self._dated_pending_loads[identifier] = (locator, self.get_time())
-        # Removes removed load identifiers
-        for identifier in self._dated_pending_loads.keys():
-            if identifier not in pending.values():
-                del self._dated_pending_loads[identifier]
-        # Times out any old loads
-        self._remove_timed_out_loads()
-        return {data[0] for key, data in self._dated_pending_loads.iteritems()}
+        current_time = self.get_time()
+        global_timeout = self.global_timeout
+
+        active = set()  # type: Set[str]
+        for locator, timestamp in pending.iteritems():
+            if current_time < timestamp + self.timeout:
+                active.add(locator)
+            elif self.timeout == global_timeout:
+                self.relinquish_load_rights(locator, timestamp)
+        return active
 
     @property
     def global_timeout(self):
@@ -133,9 +119,9 @@ class BlockLoadManager(object):
     @timeout.setter
     def timeout(self, value):
         """
-        TODO
-        :param value:
-        :return:
+        Sets the timeout.
+        :param value: timeout in seconds
+        :type value: float
         """
         self._timeout = value
         self._global_timeout_manager.add_value(value, self.identifier)
@@ -146,44 +132,20 @@ class BlockLoadManager(object):
         the given locator.
         :param locator: the locator of the block to load
         :type locator: str
-        :return: `True` if this load manager has been given the rights to load
-        the block, else `False` if the block is to be loaded by another
-        :rtype: Optional[str]
+        :return: timestamp of the reserve else `None` if not reserved
+        :rtype: Optional[float]
         """
-        identifier = "%d-%s" % (os.getpid(), uuid.uuid4())
-        self._dated_pending_loads[identifier] = (locator, self.get_time())
-        load_rights = self._reserve_load_rights(locator, identifier)
-        return identifier if load_rights else None
+        timestamp = self.get_time()
+        return self._reserve_load_rights(locator, timestamp)
 
     def get_time(self):
         """
-        Gets a monotonic time, expressed in seconds as a float. Only the
-        difference between times should be used.
-        :return: the current time
-        :rtype: float
+        Gets the number of milliseconds since the epoch. Must be synchronised
+        with other processes.
+        :return: milliseconds since the epoch
+        :rtype: int
         """
-        return monotonic()
-
-    def _remove_timed_out_loads(self):
-        """
-        Removes loads from `self._dated_pending_loads` that are considered to
-        have timed out. If the timeout used by this block load manager is the
-        highest of all load managers, the loads rights are removed from the
-        current loader.
-        """
-        current_time = self.get_time()
-        global_timeout = self.global_timeout
-        # Exploits ordering of `OrderedDict`
-        for identifier, data in self._dated_pending_loads.items():
-            locator, seen_time = data
-            if current_time - seen_time > self.timeout:
-                if self.timeout == global_timeout:
-                    self.relinquish_load_rights(identifier)
-                # Using `items()` in Python 2, which does not return an
-                # iterator so this does not interrupt the loop
-                del self._dated_pending_loads[identifier]
-            else:
-                break
+        return int(time.time() * 1000)
 
 
 class InMemoryBlockLoadManager(BlockLoadManager):
@@ -202,24 +164,23 @@ class InMemoryBlockLoadManager(BlockLoadManager):
         global_timeout_manager = InMemoryValueManager()
         super(InMemoryBlockLoadManager, self).__init__(
             global_timeout_manager, timeout)
-        self._pending = bidict()
+        self._pending = dict()     # type: Dict[str, int]
         self._pending_lock = RLock()
 
-    def relinquish_load_rights(self, identifier):
-        with self._pending_lock:
-            if identifier in self._pending.inv:
-                del self._pending.inv[identifier]
-
-    def _reserve_load_rights(self, locator, identifier):
+    def relinquish_load_rights(self, locator, timestamp):
         with self._pending_lock:
             if locator in self._pending:
-                return False
-            self._pending[locator] = identifier
-            return True
+                del self._pending[locator]
+
+    def _reserve_load_rights(self, locator, timestamp):
+        with self._pending_lock:
+            if locator in self._pending:
+                return None
+            self._pending[locator] = timestamp
+            return timestamp
 
     def _read_load_rights(self):
-        with self._pending_lock:
-            return copy(self._pending)
+        return copy(self._pending)
 
 
 class LMDBBlockLoadManager(BlockLoadManager):
@@ -228,50 +189,45 @@ class LMDBBlockLoadManager(BlockLoadManager):
 
     This can be setup to work across multiple processes.
     """
+    _PENDING_DATABASE = "Pending"
     _GLOBAL_TIMEOUT_DATABASE = "GlobalTimeout"
 
-    def __init__(self, environment, database=None, timeout=float("inf")):
+    def __init__(self, environment, timeout=float("inf")):
         """
         Constructor.
         :param environment: the LMDB environment or path to the environment
         directory. If the former is given, it must be opened with support for 2
         databases
         :type environment: Union[Environment, str]
-        :param database: the database to use
-        :type database: Union[handle, str]
         :param timeout: the time in seconds before it is considered that a
         process loading a block has stopped
         :type timeout: float
         """
         self._environment = lmdb.open(environment, max_dbs=2) if not isinstance(environment, lmdb.Environment) else environment
-        self._database = self._environment.open_db(database) if isinstance(database, str) else database
+        self._pending_database = self._environment.open_db(LMDBBlockLoadManager._PENDING_DATABASE)
         timeout_database = self._environment.open_db(LMDBBlockLoadManager._GLOBAL_TIMEOUT_DATABASE)
         global_timeout_manager = LMDBValueManager(self._environment, timeout_database)
         super(LMDBBlockLoadManager, self).__init__(global_timeout_manager, timeout)
 
-    def relinquish_load_rights(self, identifier):
-        with self._environment.begin(write=True, db=self._database) as transaction:
-            with transaction.cursor(self._database) as cursor:
-                for locator, value in cursor:
-                    if value == identifier:
-                        _logger.info("Relinquishing load rights with "
-                                     "identifier `%s`" % locator)
-                        transaction.delete(locator)
-                        break
+    def relinquish_load_rights(self, locator, timestamp):
+        assert isinstance(timestamp, int)
+        timestamp = str(timestamp)
+        with self._environment.begin(write=True, db=self._pending_database) as transaction:
+            value = transaction.get(locator)
+            if value == timestamp:
+                _logger.info("Relinquishing load rights for locator `%s` with "
+                             "timestamp of %s" % (locator, timestamp))
+                transaction.delete(locator)
 
-    def _reserve_load_rights(self, locator, identifier):
+    def _reserve_load_rights(self, locator, timestamp):
         locator = to_bytes(locator)
-        with self._environment.begin(write=True, db=self._database) as transaction:
-            reserved = transaction.put(locator, identifier, overwrite=False)
+        with self._environment.begin(write=True, db=self._pending_database) as transaction:
+            reserved = transaction.put(locator, str(timestamp), overwrite=False)
             _logger.info("%s to reserve load rights for locator `%s`"
                          % ("Succeeded" if reserved else "Failed", locator))
-            return reserved
+            return timestamp if reserved else None
 
     def _read_load_rights(self):
-        with self._environment.begin(db=self._database) as transaction:
-            with transaction.cursor(self._database) as cursor:
-                pending = {key: value for key, value in cursor}
-                # Strange quirk of LMDB is that the names of sub-database are
-                # keys
-                del pending[LMDBBlockLoadManager._GLOBAL_TIMEOUT_DATABASE]
-                return pending
+        with self._environment.begin(db=self._pending_database) as transaction:
+            with transaction.cursor(self._pending_database) as cursor:
+                return {key: int(value) for key, value in cursor}
