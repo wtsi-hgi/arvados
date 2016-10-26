@@ -139,7 +139,7 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         Constructor.
         :param block_store: store for blocks
         :type block_store: BookkeepingBlockStore
-        :param cache_max: maximum cache size (default: 20GB)
+        :param cache_max: maximum cache size
         :type cache_max: int
         :param cache_replacement_policy: policy used to determine what to
         delete from the cache if required to store a new item
@@ -248,8 +248,8 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         different content for the same locator. Given that the locator is a hash
         of the contents, it is highly unlikely that such condition will occur.
 
-        As `InMemoryKeepBlockCache` also suffers from this race condition, it is
-        assumed that it is safe to ignore it.
+        As the original implementation also suffers from this race condition,
+        it is assumed that it is safe to ignore it.
         :param locator: content identifier
         :type locator: str
         :param content: the content
@@ -282,7 +282,8 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
                 self._writing_lock.release()
                 write_wait.acquire()
                 # Given that the locator is a hash of the content, it is highly
-                # likely at this point that the content has already been written
+                # likely at this point that the content has already been
+                # written
 
         assert locator in self._writing
         required_space = self.block_store.calculate_stored_size(content)
@@ -308,8 +309,9 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
         policy to delete existing entries if more space is required.
 
         Will raise a `ValueError` if the given space is more than the total
-        cache space
+        cache space.
         :param space: the space that is to be reserved in the cache in bytes
+        :type space: int
         """
         if space > self.cache_max:
             raise ValueError("Cannot reserve more space in the cache than the "

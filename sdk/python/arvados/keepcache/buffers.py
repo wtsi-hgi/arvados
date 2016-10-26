@@ -58,7 +58,7 @@ class OpeningBuffer(PseudoBuffer):
 
         def next(self):
             with self.parent._transaction_lock:
-                with self.parent._database.begin(buffers=True) as transaction:
+                with self.parent._environment.begin(buffers=True) as transaction:
                     buffer_pointer = transaction.get(self.parent.locator)
                     self.parent._raise_if_invalid_buffer(buffer_pointer)
                     if self._index == len(buffer_pointer):
@@ -70,18 +70,18 @@ class OpeningBuffer(PseudoBuffer):
         def __iter__(self):
             return self
 
-    def __init__(self, locator, database, database_lock):
+    def __init__(self, locator, environment, database_lock):
         """
         Constructor.
         :param locator: locator holding the buffer
         :type locator: bytes
-        :param database: TODO
+        :param environment: TODO
         :type: Environment
         :param database_lock: TODO
         :type: Lock
         """
         self.locator = locator
-        self._database = database
+        self._environment = environment
         self._transaction_lock = database_lock
 
     def __iter__(self):
@@ -89,14 +89,14 @@ class OpeningBuffer(PseudoBuffer):
 
     def __getitem__(self, index):
         with self._transaction_lock:
-            with self._database.begin(buffers=True) as transaction:
+            with self._environment.begin(buffers=True) as transaction:
                 buffer_pointer = transaction.get(self.locator)
                 self._raise_if_invalid_buffer(buffer_pointer)
                 return buffer_pointer[index]
 
     def __len__(self):
         with self._transaction_lock:
-            with self._database.begin(buffers=True) as transaction:
+            with self._environment.begin(buffers=True) as transaction:
                 buffer_pointer = transaction.get(self.locator)
                 self._raise_if_invalid_buffer(buffer_pointer)
                 return len(buffer_pointer)
@@ -110,7 +110,7 @@ class OpeningBuffer(PseudoBuffer):
 
     def __str__(self):
         with self._transaction_lock:
-            with self._database.begin() as transaction:
+            with self._environment.begin() as transaction:
                 data = transaction.get(self.locator)
                 self._raise_if_invalid_buffer(data)
                 return str(data)

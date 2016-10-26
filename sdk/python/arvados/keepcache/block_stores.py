@@ -185,7 +185,7 @@ class LMDBBlockStore(BlockStore):
         self._exclusive_write_access = GlobalLock(
             os.path.join(directory, "access.lock"))
         with self._exclusive_write_access:
-            self._database = lmdb.open(
+            self._environment = lmdb.open(
                 directory, writemap=True, map_size=max_size,
                 max_readers=max_readers, max_spare_txns=max_spare_transactions)
         self._max_size = max_size
@@ -194,7 +194,7 @@ class LMDBBlockStore(BlockStore):
     def exists(self, locator):
         locator = to_bytes(locator)
         with self._transaction_lock:
-            with self._database.begin() as transaction:
+            with self._environment.begin() as transaction:
                 with transaction.cursor() as cursor:
                     return cursor.set_key(locator)
 
@@ -206,7 +206,7 @@ class LMDBBlockStore(BlockStore):
             return None
 
         content_buffer = OpeningBuffer(
-            to_bytes(locator), self._database, self._transaction_lock)
+            to_bytes(locator), self._environment, self._transaction_lock)
         return content_buffer
 
     def put(self, locator, content):
@@ -218,7 +218,7 @@ class LMDBBlockStore(BlockStore):
 
         # TODO: Transaction lock required for write transaction?
         with self._transaction_lock:
-            with self._database.begin(write=True) as transaction:
+            with self._environment.begin(write=True) as transaction:
                 transaction.put(locator, content)
 
     def delete(self, locator):
@@ -227,7 +227,7 @@ class LMDBBlockStore(BlockStore):
         _logger.debug("Deleting value for `%s` in LMDB" % locator)
         # TODO: Transaction lock required for write transaction?
         with self._transaction_lock:
-            with self._database.begin(write=True) as transaction:
+            with self._environment.begin(write=True) as transaction:
                 deleted = transaction.delete(locator)
 
         return deleted
@@ -239,7 +239,7 @@ class LMDBBlockStore(BlockStore):
         # most Keep blocks will be large, the loss will be relatively small.
         size = len(content)
         page_size = self._get_page_size()
-        max_key_size = self._database.max_key_size()
+        max_key_size = self._environment.max_key_size()
         return int(ceil(float(LMDBBlockStore._HEADER_SIZE + max_key_size + size)
                         / float(page_size)) * page_size)
 
@@ -264,7 +264,7 @@ class LMDBBlockStore(BlockStore):
         :return: the page size in bytes
         :rtype: int
         """
-        return self._database.stat()["psize"]
+        return self._environment.stat()["psize"]
 
 
 class LoadCommunicationBlockStore(BlockStore):

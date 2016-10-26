@@ -4,6 +4,7 @@ import time
 import uuid
 from abc import ABCMeta, abstractmethod
 from copy import copy
+from errno import EEXIST
 from threading import RLock
 
 import lmdb
@@ -203,6 +204,12 @@ class LMDBBlockLoadManager(BlockLoadManager):
         process loading a block has stopped
         :type timeout: float
         """
+        if isinstance(environment, str) and not os.path.exists(environment):
+            try:
+                os.mkdir(environment)
+            except OSError as e:
+                if e.errno != EEXIST:
+                    raise e
         self._environment = lmdb.open(environment, max_dbs=2) if not isinstance(environment, lmdb.Environment) else environment
         self._pending_database = self._environment.open_db(LMDBBlockLoadManager._PENDING_DATABASE)
         timeout_database = self._environment.open_db(LMDBBlockLoadManager._GLOBAL_TIMEOUT_DATABASE)
