@@ -1,5 +1,8 @@
 import logging
+import os
+import threading
 from abc import ABCMeta, abstractmethod
+from uuid import uuid4
 
 _logger = logging.getLogger(__name__)
 
@@ -70,19 +73,19 @@ class OpeningBuffer(PseudoBuffer):
         def __iter__(self):
             return self
 
-    def __init__(self, locator, environment, database_lock):
+    def __init__(self, locator, environment, transaction_lock):
         """
         Constructor.
         :param locator: locator holding the buffer
         :type locator: bytes
         :param environment: TODO
         :type: Environment
-        :param database_lock: TODO
+        :param transaction_lock: TODO
         :type: Lock
         """
         self.locator = locator
         self._environment = environment
-        self._transaction_lock = database_lock
+        self._transaction_lock = transaction_lock
 
     def __iter__(self):
         return OpeningBuffer._BufferIterator(self)

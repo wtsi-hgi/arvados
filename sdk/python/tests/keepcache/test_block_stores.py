@@ -8,8 +8,10 @@ from types import MethodType
 
 from arvados.keepcache.block_load_managers import InMemoryBlockLoadManager
 from arvados.keepcache.block_store_bookkeepers import \
-    InMemoryBlockStoreBookkeeper, BlockGetRecord, BlockPutRecord, \
+    InMemoryBlockStoreBookkeeper, BlockPutRecord, \
     BlockDeleteRecord
+from arvados.keepcache.block_store_records import BlockGetRecord, \
+    BlockPutRecord, BlockDeleteRecord
 from arvados.keepcache.block_stores import LMDBBlockStore, \
     InMemoryBlockStore, BookkeepingBlockStore, LoadCommunicationBlockStore
 from tests.keepcache._common import CONTENTS, LOCATOR_2, CACHE_SIZE, \

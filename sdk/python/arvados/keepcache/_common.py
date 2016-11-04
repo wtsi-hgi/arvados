@@ -1,12 +1,34 @@
+from datetime import datetime
 
 
-def to_bytes(str_or_bytes):
+def to_bytes(value):
     """
-    Converts the given string or bytes to bytes (no-op with the latter).
-    :param str_or_bytes: the string or bytes
-    :type str_or_bytes: Union[str, bytes]
+    Converts the given value to bytes, based on the value's string
+    representation (no-op if already bytes).
+    :param value: the value to convert
+    :type value: Any
     :return: bytes representation
     :rtype: bytes
     """
-    return str_or_bytes if isinstance(str_or_bytes, bytes) \
-        else str_or_bytes.encode()
+    return value if isinstance(value, bytes) \
+        else str(value).encode()
+
+
+def datetime_to_unix_time(timestamp):
+    """
+    TODO
+    :param timestamp: timestamp to convert (must be in UTC)
+    :type timestamp: datetime
+    :return:
+    """
+    return (timestamp - datetime.utcfromtimestamp(0)).total_seconds()
+
+
+def unix_time_to_datetime(unix_time):
+    """
+    TODO
+    :param unix_time:
+    :return:
+    """
+    unix_time = float(unix_time)
+    return datetime.utcfromtimestamp(unix_time)

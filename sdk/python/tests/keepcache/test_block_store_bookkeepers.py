@@ -2,11 +2,14 @@ import unittest
 from abc import ABCMeta, abstractmethod
 from datetime import datetime
 
+import lmdb
 from mock import MagicMock
 
 from arvados.keepcache.block_store_bookkeepers import \
-    InMemoryBlockStoreBookkeeper, SqlBlockStoreBookkeeper, BlockGetRecord, \
-    BlockDeleteRecord, BlockPutRecord
+    InMemoryBlockStoreBookkeeper, SqlBlockStoreBookkeeper, \
+    LMDBBlockStoreBookkeeper
+from arvados.keepcache.block_store_records import BlockGetRecord, \
+    BlockPutRecord, BlockDeleteRecord
 from tests.keepcache._common import CONTENTS, LOCATORS, TempManager
 
 
@@ -33,6 +36,14 @@ class _TestBlockStoreBookkeeper(unittest.TestCase):
                 self.bookkeeper._get_current_timestamp.call_count, 1, 1)
         self.bookkeeper._get_current_timestamp = MagicMock(
             side_effect=create_timestamp)
+
+    def test_get_active(self):
+        self.bookkeeper.record_put("1", 1)
+        self.bookkeeper.record_put("2", 2)
+        self.bookkeeper.record_delete("1")
+        active = self.bookkeeper.get_active()
+        self.assertEqual(1, len(active))
+        self.assertEqual("2", list(active)[0].locator)
 
     def test_get_active_storage_size(self):
         self.bookkeeper.record_put("1", 1)
@@ -206,6 +217,22 @@ class TestSqlBlockStoreBookkeeper(_TestBlockStoreBookkeeper):
         self._temp_directory_manager.temp_files.append(database_lock_location)
         return SqlBlockStoreBookkeeper(
             "sqlite:///%s" % database_location, database_lock_location)
+
+
+class TestLMDBBlockStoreBookkeeper(_TestBlockStoreBookkeeper):
+    """
+    Tests for `LMDBBlockStoreBookkeeper`.
+    """
+    def setUp(self):
+        self._temp_directory_manager = TempManager()
+        super(TestLMDBBlockStoreBookkeeper, self).setUp()
+
+    def tearDown(self):
+        self._temp_directory_manager.remove_all()
+
+    def _create_bookkeeper(self):
+        database_location = self._temp_directory_manager.create_directory()
+        return LMDBBlockStoreBookkeeper(database_location)
 
 
 # Work around to stop unittest from trying to run the abstract base class

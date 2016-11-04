@@ -1,85 +1,30 @@
-from abc import ABCMeta, abstractmethod, abstractproperty
+from abc import ABCMeta, abstractmethod
 from collections import defaultdict
 from datetime import datetime
 
-from sqlalchemy import Column, String, Integer, create_engine, DateTime, \
-    TypeDecorator
-from sqlalchemy.ext.declarative import declarative_base
+import lmdb
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.sql import func
 from sqlalchemy.sql.elements import or_
 
+from arvados.keepcache._common import to_bytes, datetime_to_unix_time, \
+    unix_time_to_datetime
 from arvados.keepcache._locks import GlobalLock
-
-
-class BlockRecord(object):
-    """
-    Timestamped record of an interaction involving a block that has a locator.
-    """
-    @abstractproperty
-    def locator(self):
-        """
-        Gets the locator of the block to which this record refers.
-        :return: the block record
-        :rtype: str
-        """
-
-    @abstractproperty
-    def timestamp(self):
-        """
-        Gets the timestamp of this record.
-        :return: the timestamp
-        :rtype: datetime
-        """
-
-
-class BlockGetRecord(BlockRecord):
-    """
-    Timestamped record of a block being accessed from a cache (implies a cache
-    hit).
-    """
-
-
-class BlockModificationRecord(BlockRecord):
-    """
-    Timestamped record of a modification to a block that has a locator.
-    """
-
-
-class BlockPutRecord(BlockModificationRecord):
-    """
-    Timestamped record of a block of a certain size being put into a cache
-    (implies a cache miss).
-    """
-    @abstractproperty
-    def size(self):
-        """
-        Gets the size of the block that was put.
-        :return: the size in bytes
-        :rtype: int
-        """
-
-
-class BlockDeleteRecord(BlockModificationRecord):
-    """
-    Timestamped record of a block being deleted from a cache.
-    """
+from arvados.keepcache.block_store_records import BlockRecord, BlockGetRecord, \
+    BlockPutRecord, BlockDeleteRecord, InMemoryBlockDeleteRecord, \
+    InMemoryBlockPutRecord, InMemoryBlockGetRecord, SqlAlchemyBlockDeleteRecord, \
+    SqlAlchemyBlockPutRecord, SqlAlchemyBlockGetRecord, SqlAlchemyModel
 
 
 class BlockStoreBookkeeper(object):
     """
     Bookkeeper for the usage of a block store.
+
+    Concrete methods can be overridden if there is a more efficient way of
+    achieving the functionality in the underlying technology.
     """
     __metaclass__ = ABCMeta
-
-    @abstractmethod
-    def get_active(self):
-        """
-        Gets the put records of the blocks that are currently in the block store
-        whose usage is being recorded.
-        :return: active blocks
-        :rtype: Set[BlockPutRecord]
-        """
 
     @abstractmethod
     def record_get(self, locator):
@@ -120,6 +65,26 @@ class BlockStoreBookkeeper(object):
         :return: the records
         :rtype: Set[Record]
         """
+
+    def get_active(self):
+        """
+        Gets the put records of the blocks that are currently in the block
+        store whose usage is being recorded.
+        :return: active blocks
+        :rtype: Set[BlockPutRecord]
+        """
+        locator_records = dict()  # type: Dict[str, Record]
+
+        for record in self.get_all_put_records() \
+                | self.get_all_delete_records():
+            if record.locator not in locator_records:
+                locator_records[record.locator] = record
+            else:
+                if record.timestamp > locator_records[record.locator].timestamp:
+                    locator_records[record.locator] = record
+
+        return {record for record in locator_records.values()
+                if isinstance(record, BlockPutRecord)}
 
     def get_active_storage_size(self):
         """
@@ -187,77 +152,30 @@ class BlockStoreBookkeeper(object):
         :return: the current time
         :rtype: datetime
         """
-        return datetime.now()
+        return datetime.utcnow()
 
 
 class InMemoryBlockStoreBookkeeper(BlockStoreBookkeeper):
     """
     In memory bookkeeper for usage of a block store.
     """
-    class InMemoryBlockRecord(BlockRecord):
-        """In memory block record."""
-        __metaclass__ = ABCMeta
-
-        def __init__(self, locator, timestamp):
-            self._locator = locator
-            self._timestamp = timestamp
-
-        @property
-        def locator(self):
-            return self._locator
-
-        @property
-        def timestamp(self):
-            return self._timestamp
-
-    class InMemoryBlockPutRecord(InMemoryBlockRecord, BlockPutRecord):
-        """In memory block put record."""
-        def __init__(self, locator, timestamp, size):
-            super(InMemoryBlockStoreBookkeeper.InMemoryBlockPutRecord, self).\
-                __init__(locator, timestamp)
-            self._size = size
-
-        @property
-        def size(self):
-            return self._size
-
-    class InMemoryBlockGetRecord(InMemoryBlockRecord, BlockGetRecord):
-        """In memory block get record."""
-
-    class InMemoryBlockDeleteRecord(InMemoryBlockRecord, BlockDeleteRecord):
-        """In memory block delete record."""
-
     def __init__(self):
         self._records = defaultdict(set)  # type: Dict[type, Set[Record]]
 
-    def get_active(self):
-        locator_records = dict()  # type: Dict[str, Record]
-
-        for record in self._records[BlockPutRecord] \
-                | self._records[BlockDeleteRecord]:
-            if record.locator not in locator_records:
-                locator_records[record.locator] = record
-            else:
-                if record.timestamp > locator_records[record.locator].timestamp:
-                    locator_records[record.locator] = record
-
-        return {record for record in locator_records.values()
-                if isinstance(record, BlockPutRecord)}
-
     def record_get(self, locator):
-        record = InMemoryBlockStoreBookkeeper.InMemoryBlockGetRecord(
+        record = InMemoryBlockGetRecord(
             locator, self._get_current_timestamp()
         )
         self._records[BlockGetRecord].add(record)
 
     def record_put(self, locator, content_size):
-        record = InMemoryBlockStoreBookkeeper.InMemoryBlockPutRecord(
+        record = InMemoryBlockPutRecord(
             locator, self._get_current_timestamp(), content_size
         )
         self._records[BlockPutRecord].add(record)
 
     def record_delete(self, locator):
-        record = InMemoryBlockStoreBookkeeper.InMemoryBlockDeleteRecord(
+        record = InMemoryBlockDeleteRecord(
             locator, self._get_current_timestamp()
         )
         self._records[BlockDeleteRecord].add(record)
@@ -277,56 +195,11 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
     Bookkeeper of usage of a block store where records are kept in an SQL
     database.
     """
-    _SQLAlchemyModel = declarative_base()
-
-    class _SqlAlchemyBlockRecord(_SQLAlchemyModel, BlockRecord):
-        class _Python2String(TypeDecorator):
-            impl = String
-
-            def process_result_value(self, value, dialect):
-                if isinstance(value, unicode):
-                    value = value.encode("utf-8")
-                    assert isinstance(value, str)
-                return value
-
-        __abstract__ = True
-        __tablename__ = BlockRecord.__name__
-        id = Column(Integer, primary_key=True)
-        locator = Column(_Python2String)
-        timestamp = Column(DateTime)
-
-    class _SqlAlchemyBlockPutRecord(_SqlAlchemyBlockRecord, BlockPutRecord):
-        __tablename__ = BlockPutRecord.__name__
-        size = Column(Integer)
-
-    class _SqlAlchemyBlockGetRecord(_SqlAlchemyBlockRecord, BlockGetRecord):
-        __tablename__ = BlockGetRecord.__name__
-
-    class _SqlAlchemyBlockDeleteRecord(_SqlAlchemyBlockRecord, BlockDeleteRecord):
-        __tablename__ = BlockDeleteRecord.__name__
-
-    SQL_ALCHEMY_RECORD_TYPES = [
-        _SqlAlchemyBlockGetRecord,
-        _SqlAlchemyBlockPutRecord,
-        _SqlAlchemyBlockDeleteRecord
-    ]
-
-    @staticmethod
-    def _get_sql_record_type(generic_type):
-        """
-        Gets the SQL record type that is a subclass of the generic block record
-        type given.
-        :param generic_type: the generic record type
-        :type generic_type: type
-        :return: the SQL record type else `None` if none found
-        :rtype: Optional[type]
-        """
-        assert issubclass(generic_type, BlockRecord)
-        for record_type in SqlBlockStoreBookkeeper.SQL_ALCHEMY_RECORD_TYPES:
-            assert issubclass(record_type, SqlBlockStoreBookkeeper._SQLAlchemyModel)
-            if issubclass(record_type, generic_type):
-                return record_type
-        return None
+    _RECORD_TO_SQL_RECORD = {
+        BlockGetRecord: SqlAlchemyBlockGetRecord,
+        BlockPutRecord: SqlAlchemyBlockPutRecord,
+        BlockDeleteRecord: SqlAlchemyBlockDeleteRecord
+    }
 
     def __init__(self, database_location, write_lock_location=None):
         """
@@ -338,13 +211,25 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
         :type write_lock_location: Optional[str]
         """
         self._engine = create_engine(database_location)
-        SqlBlockStoreBookkeeper._SQLAlchemyModel.metadata.create_all(
-            bind=self._engine)
+        SqlAlchemyModel.metadata.create_all(bind=self._engine)
         self._write_lock = GlobalLock(write_lock_location) if write_lock_location else None
 
+    def record_get(self, locator):
+        record = self._create_record(SqlAlchemyBlockGetRecord, locator)
+        self._store(record)
+
+    def record_put(self, locator, content_size):
+        record = self._create_record(SqlAlchemyBlockPutRecord, locator)
+        record.size = content_size
+        self._store(record)
+
+    def record_delete(self, locator):
+        record = self._create_record(SqlAlchemyBlockDeleteRecord, locator)
+        self._store(record)
+
     def get_active(self):
-        PutRecord = SqlBlockStoreBookkeeper._SqlAlchemyBlockPutRecord
-        DeleteRecord = SqlBlockStoreBookkeeper._SqlAlchemyBlockDeleteRecord
+        PutRecord = SqlAlchemyBlockPutRecord
+        DeleteRecord = SqlAlchemyBlockDeleteRecord
         session = self._create_session()
         subquery = session.query(PutRecord, func.max(DeleteRecord.timestamp).label(
             "latest_delete")). \
@@ -362,24 +247,8 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
         session.close()
         return set(results)
 
-    def record_get(self, locator):
-        record = self._create_record(
-            SqlBlockStoreBookkeeper._SqlAlchemyBlockGetRecord, locator)
-        self._store(record)
-
-    def record_put(self, locator, content_size):
-        record = self._create_record(
-            SqlBlockStoreBookkeeper._SqlAlchemyBlockPutRecord, locator)
-        record.size = content_size
-        self._store(record)
-
-    def record_delete(self, locator):
-        record = self._create_record(
-            SqlBlockStoreBookkeeper._SqlAlchemyBlockDeleteRecord, locator)
-        self._store(record)
-
     def _get_all_records_of_type(self, record_type, locators, since):
-        sql_record_type = SqlBlockStoreBookkeeper._get_sql_record_type(record_type)
+        sql_record_type = SqlBlockStoreBookkeeper._RECORD_TO_SQL_RECORD[record_type]
         session = self._create_session()
         query = session.query(sql_record_type)
         if locators is not None:
@@ -428,3 +297,89 @@ class SqlBlockStoreBookkeeper(BlockStoreBookkeeper):
         session.close()
         if self._write_lock is not None:
             self._write_lock.release()
+
+
+class LMDBBlockStoreBookkeeper(BlockStoreBookkeeper):
+    """
+    LMDB backed block store bookkeeper.
+    """
+    _PUT_DATABASE_NAME = "Put"
+    _GET_DATABASE_NAME = "Get"
+    _DELETE_DATABASE_NAME = "Delete"
+    _SIZE_DATABASE = "Size"
+
+    _RECORD_TO_IN_MEMORY_RECORD = {
+        BlockGetRecord: InMemoryBlockGetRecord,
+        BlockPutRecord: InMemoryBlockPutRecord,
+        BlockDeleteRecord: InMemoryBlockDeleteRecord
+    }
+
+    def __init__(self, lmdb_directory):
+        """
+        Constructor.
+        :param lmdb_directory: the directory to be used with LMDB.
+        :type lmdb_directory: str
+        """
+        self._environment = lmdb.open(lmdb_directory, max_dbs=4)
+        self._put_database = self._environment.open_db(
+            LMDBBlockStoreBookkeeper._PUT_DATABASE_NAME, dupsort=True)
+        self._get_database = self._environment.open_db(
+            LMDBBlockStoreBookkeeper._GET_DATABASE_NAME, dupsort=True)
+        self._delete_database = self._environment.open_db(
+            LMDBBlockStoreBookkeeper._DELETE_DATABASE_NAME, dupsort=True)
+        self._size_database = self._environment.open_db(
+            LMDBBlockStoreBookkeeper._SIZE_DATABASE, dupsort=True)
+        self._type_database_mapping = {
+            BlockGetRecord: self._get_database,
+            BlockPutRecord: self._put_database,
+            BlockDeleteRecord: self._delete_database
+        }
+
+    def record_get(self, locator):
+        self._record(self._get_database, locator)
+
+    def record_put(self, locator, content_size):
+        self._record(self._put_database, locator)
+        with self._environment.begin(db=self._size_database, write=True) as transaction:
+            transaction.put(locator, to_bytes(content_size))
+
+    def record_delete(self, locator):
+        self._record(self._delete_database, locator)
+
+    def _get_all_records_of_type(self, record_type, locators, since):
+        database = self._type_database_mapping[record_type]
+        record_type = LMDBBlockStoreBookkeeper._RECORD_TO_IN_MEMORY_RECORD[record_type]
+        records = set()     # type: Set[Record]
+
+        with self._environment.begin(db=database) as transaction:
+            with transaction.cursor(db=database) as cursor:
+                for _, locator in enumerate(cursor.iternext(values=False)):
+                    # XXX: If filter, could iterate on locators instead
+                    if locators is None or locator in locators:
+                        for _, timestamp in enumerate(cursor.iterprev_dup(keys=False)):
+                            timestamp = unix_time_to_datetime(timestamp)
+                            if since is None or timestamp >= since:
+                                if not issubclass(record_type, BlockPutRecord):
+                                    record = record_type(locator, timestamp)
+                                else:
+                                    # XXX: Could keep this transaction open if getting puts
+                                    with self._environment.begin(db=self._size_database) as size_transaction:
+                                        size = int(size_transaction.get(to_bytes(locator)))
+                                    record = record_type(locator, timestamp, size)
+                                records.add(record)
+                        # Move cursor back to continue iteration through keys
+                        cursor.last_dup()
+        return records
+
+    def _record(self, database, locator):
+        """
+        Records timestamped use of the given locator in the given database.
+        :param database: the database to be used
+        :type database: _Database
+        :param locator: locator to record use of
+        :type locator: str
+        """
+        locator = to_bytes(locator)
+        unix_time = to_bytes(datetime_to_unix_time(self._get_current_timestamp()))
+        with self._environment.begin(db=database, write=True) as transaction:
+            transaction.put(locator, unix_time)
