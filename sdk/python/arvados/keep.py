@@ -539,7 +539,8 @@ class KeepClient(object):
     def __init__(self, api_client=None, proxy=None,
                  timeout=DEFAULT_TIMEOUT, proxy_timeout=DEFAULT_PROXY_TIMEOUT,
                  api_token=None, local_store=None, block_cache=None,
-                 num_retries=0, session=None, cache_load_manager=None):
+                 num_retries=0, session=None, block_load_manager=None,
+                 number_times_to_trust_others_to_load=3):
         """Initialize a new KeepClient.
 
         Arguments:
@@ -588,13 +589,24 @@ class KeepClient(object):
           use local storage, pass in an empty string.  This is primarily
           intended to mock a server for testing.
 
+        :block_cache:
+          Cache for blocks.
+
         :num_retries:
           The default number of times to retry failed requests.
           This will be used as the default num_retries value when get() and
           put() are called.  Default 0.
 
-        :cache_load_manager:
-          TODO
+        :block_load_manager:
+          (Optional) Manager to coordinate the loading of blocks between
+          different instances that share a block cache.
+
+        :number_times_to_trust_others_to_load:
+          The number of times to trust other instances to load a block before
+          forgetting about what the other instances are doing and loading it
+          ourselves. e.g. If set to 3, will tolerate other instances trying and
+          failing to load the block 3 times before no longer trusting the
+          others and loading without reserving the rights to.
         """
         self.lock = threading.Lock()
         if proxy is None:
@@ -611,7 +623,8 @@ class KeepClient(object):
             local_store = os.environ.get('KEEP_LOCAL_STORE')
 
         self.block_cache = block_cache if block_cache else InMemoryKeepBlockCache()
-        self.cache_load_manager = cache_load_manager if cache_load_manager else None
+        self.block_load_manager = block_load_manager if block_load_manager else None
+        self.number_times_to_trust_others_to_load = number_times_to_trust_others_to_load
         self.timeout = timeout
         self.proxy_timeout = proxy_timeout
         self._user_agent_pool = Queue.LifoQueue()
@@ -839,6 +852,7 @@ class KeepClient(object):
 
         self.get_counter.add(1)
 
+        load_reserve_timestamp = None
         locator = KeepLocator(loc_s)
         if method == "GET":
             slot, first = self.block_cache.reserve_cache(locator.md5sum)
@@ -846,35 +860,35 @@ class KeepClient(object):
                 self.hits_counter.add(1)
                 v = slot.get()
                 return v
+            elif self.block_load_manager is not None:
+                retries = 0
+                while load_reserve_timestamp is None and retries < self.number_times_to_trust_others_to_load:
+                    # See if this process can reserve rights to load the block for everyone
+                    load_reserve_timestamp = self.block_load_manager.reserve_load_rights(
+                        locator.md5sum)
+                    if load_reserve_timestamp is None and locator.md5sum in self.block_load_manager.pending:
+                        # Did not get rights to load block - indicates that another instance is already loading it
+                        data = self.block_cache._block_store.get(locator.md5sum)
+                        if data is not None:
+                            # Data loaded by other process
+                            return data
+                        else:
+                            _logger.warn("Another instance failed to load the "
+                                         "block `%s`" % locator.md5sum)
+                    retries += 1
+                if load_reserve_timestamp is None:
+                    _logger.warn(
+                        "Did not reserve rights to load block `%s` but going "
+                        "ahead anyway after others failed %d time(s) to load "
+                        "it" % locator.md5sum)
+                else:
+                    """
+                    XXX: ideally we want to wrap the below in a try... finally
+                    block or atexit that ensures load_complete is called,
+                    regardless of whether the data block made it into the cache
+                    """
 
         self.misses_counter.add(1)
-
-        loading_for_others = False
-        if self.cache_load_manager is not None:
-            # TODO: Sort these out
-            MAX_TIMES_TO_WAIT_FOR_OTHER = 3
-            MAX_SECONDS_WAITING_FOR_OTHER = 60.0
-
-            wait_for_others = 0
-            while wait_for_others < MAX_TIMES_TO_WAIT_FOR_OTHER \
-                    and not loading_for_others:
-                if locator in self.cache_load_manager.pending_loads:
-                    # Another processes is already loading the block so waiting
-                    # for them to put it inot the cache
-                    loaded = self.cache_load_manager.wait_for_load(
-                        locator, timeout=MAX_SECONDS_WAITING_FOR_OTHER)
-                    if loaded:
-                        # Is is possible that the data is no longer in the
-                        # cache at this point!
-                        data = self.get_from_cache(locator)
-                        if data is not None:
-                            return data
-                    wait_for_others += 1
-                else:
-                    # Reserve rights to get!
-                    reserved = self.cache_load_manager.reserve_load(locator)
-                    if reserved:
-                        loading_for_others = True
 
         # If the locator has hints specifying a prefix (indicating a
         # remote keepproxy) or the UUID of a local gateway service,
@@ -930,8 +944,9 @@ class KeepClient(object):
         # Always cache the result, then return it if we succeeded.
         if method == "GET":
             slot.set(blob)
-            if loading_for_others:
-                self.cache_load_manager.load_completed(locator)
+            if load_reserve_timestamp is not None:
+                self.block_load_manager.relinquish_load_rights(
+                    locator.md5sum, load_reserve_timestamp)
             self.block_cache.cap_cache()
         if loop.success():
             if method == "HEAD":
