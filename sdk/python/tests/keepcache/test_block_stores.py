@@ -187,6 +187,14 @@ class TestLoadCommunicationBlockStore(_TestBlockStore):
             underlying_block_store, block_load_manager)
         self.assertEqual(3, block_store.method_outside_interface())
 
+    def test_get_if_exists_when_does_not_exist(self):
+        self.assertIsNone(self.block_store.get_if_exists(LOCATOR_1))
+
+    def test_get_if_exists_when_exists(self):
+        self.block_store.put(LOCATOR_1, CONTENTS)
+        assert self.block_store.exists(LOCATOR_1)
+        self.assertEqual(CONTENTS, self.block_store.get_if_exists(LOCATOR_1))
+
     def _create_block_store(self):
         block_load_manager = InMemoryBlockLoadManager(float("inf"))
         return self._create_block_store_with_load_manager(block_load_manager)
@@ -250,9 +258,15 @@ class TestBookkeepingBlockStore(_TestBlockStore):
         self.assertEqual(
             self.block_store.calculate_stored_size(CONTENTS), records[0].size)
 
-    def test_records_delete(self):
+    def test_does_not_record_delete_if_not_put(self):
         self.block_store.delete(LOCATOR_1)
-        records = list(self.bookkeeper.get_all_records())
+        self.assertEqual(0, len(self.bookkeeper.get_all_records()))
+
+    def test_records_delete(self):
+        self.block_store.put(LOCATOR_1, CONTENTS)
+        put_records = self.bookkeeper.get_all_records()
+        self.block_store.delete(LOCATOR_1)
+        records = list(self.bookkeeper.get_all_records() - put_records)
         self.assertEqual(1, len(records))
         self.assertIsInstance(records[0], BlockDeleteRecord)
         self.assertEqual(LOCATOR_1, records[0].locator)

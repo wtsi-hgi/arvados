@@ -325,9 +325,9 @@ class BlockStoreBackedKeepBlockCache(KeepBlockCache):
                     self.block_store.bookkeeper)
 
                 if delete_locator is not None:
+                    _logger.debug("Deleting `%s` to make space" % delete_locator)
                     assert delete_locator in [put.locator for put
                                               in self.block_store.bookkeeper.get_active()]
-                    _logger.debug("Deleting `%s` to make space" % delete_locator)
                     deleted = self.block_store.delete(delete_locator)
                     assert deleted
                 else:

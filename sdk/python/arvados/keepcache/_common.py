@@ -1,5 +1,8 @@
 from datetime import datetime
 
+ONE_MB = 1 * 1024 * 1024
+ONE_GB = 1 * ONE_MB * 1024
+
 
 def to_bytes(value):
     """

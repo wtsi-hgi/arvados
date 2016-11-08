@@ -1,6 +1,6 @@
 import logging
 import os
-from abc import ABCMeta, abstractmethod
+from abc import ABCMeta, abstractmethod, abstractproperty
 from errno import EEXIST
 from math import ceil
 from threading import Lock
@@ -21,13 +21,7 @@ class BlockStore(object):
     """
     __metaclass__ = ABCMeta
 
-    def __init__(self):
-        """
-        Constructor.
-        """
-        self._exclusive_write_access = Lock()
-
-    @property
+    @abstractproperty
     def exclusive_write_access(self):
         """
         Gets lock that can be acquired to get exclusive access to the block
@@ -35,7 +29,6 @@ class BlockStore(object):
         :return: write access lock
         :rtype: Lock
         """
-        return self._exclusive_write_access
 
     @abstractmethod
     def exists(self, locator):
@@ -97,8 +90,12 @@ class InMemoryBlockStore(BlockStore):
     Basic in-memory block store.
     """
     def __init__(self):
-        super(InMemoryBlockStore, self).__init__()
         self._data = dict()  # type: Dict[str, bytearray]
+        self._exclusive_write_access = Lock()
+
+    @property
+    def exclusive_write_access(self):
+        return self._exclusive_write_access
 
     def exists(self, locator):
         return locator in self._data
@@ -170,8 +167,6 @@ class LMDBBlockStore(BlockStore):
         close to hand
         :type max_spare_transactions: int
         """
-        super(LMDBBlockStore, self).__init__()
-
         if not os.path.exists(directory):
             # Surround in try to cope with race condition
             try:
@@ -190,6 +185,10 @@ class LMDBBlockStore(BlockStore):
                 max_readers=max_readers, max_spare_txns=max_spare_transactions)
         self._max_size = max_size
         self._transaction_lock = Lock()
+
+    @property
+    def exclusive_write_access(self):
+        return self._exclusive_write_access
 
     def exists(self, locator):
         locator = to_bytes(locator)
@@ -293,6 +292,10 @@ class LoadCommunicationBlockStore(BlockStore):
         self._block_load_manager = block_load_manager
         self.poll_period = poll_period
 
+    @property
+    def exclusive_write_access(self):
+        return self._block_store.exclusive_write_access
+
     def __getattr__(self, name):
         return self._block_store.__getattribute__(name)
 
@@ -311,6 +314,17 @@ class LoadCommunicationBlockStore(BlockStore):
 
     def put(self, locator, content):
         return self._block_store.put(locator, content)
+
+    def get_if_exists(self, locator):
+        """
+        Gets the block if it is in the cache else returns `None` - does not
+        wait for others to load the block.
+        :param locator: the block's locator
+        :type locator: str
+        :return: the block else `None` if not in block store
+        :rtype: Optional[buffer]
+        """
+        return self._block_store.get(locator)
 
     def _wait_for_load(self, locator):
         """
@@ -355,6 +369,10 @@ class BookkeepingBlockStore(BlockStore):
         self._block_store = block_store
         self.bookkeeper = bookkeeper
 
+    @property
+    def exclusive_write_access(self):
+        return self._block_store.exclusive_write_access
+
     def exists(self, locator):
         return self._block_store.exists(locator)
 
@@ -369,8 +387,8 @@ class BookkeepingBlockStore(BlockStore):
 
     def delete(self, locator):
         return_value = self._block_store.delete(locator)
-        # Better to think things are in the store rather than not
-        self.bookkeeper.record_delete(locator)
+        if return_value:
+            self.bookkeeper.record_delete(locator)
         return return_value
 
     def calculate_stored_size(self, content):

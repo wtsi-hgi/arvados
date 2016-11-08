@@ -210,13 +210,14 @@ class LMDBBlockLoadManager(BlockLoadManager):
             except OSError as e:
                 if e.errno != EEXIST:
                     raise e
-        self._environment = lmdb.open(environment, max_dbs=2) if not isinstance(environment, lmdb.Environment) else environment
+        self._environment = lmdb.open(environment, max_dbs=2) if isinstance(environment, str) else environment
         self._pending_database = self._environment.open_db(LMDBBlockLoadManager._PENDING_DATABASE)
         timeout_database = self._environment.open_db(LMDBBlockLoadManager._GLOBAL_TIMEOUT_DATABASE)
         global_timeout_manager = LMDBValueManager(self._environment, timeout_database)
         super(LMDBBlockLoadManager, self).__init__(global_timeout_manager, timeout)
 
     def relinquish_load_rights(self, locator, timestamp):
+        locator = to_bytes(locator)
         assert isinstance(timestamp, int)
         timestamp = str(timestamp)
         with self._environment.begin(write=True, db=self._pending_database) as transaction:

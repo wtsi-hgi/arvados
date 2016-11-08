@@ -1,3 +1,4 @@
+import logging
 from abc import ABCMeta, abstractmethod
 from collections import defaultdict
 from datetime import datetime
@@ -9,12 +10,14 @@ from sqlalchemy.sql import func
 from sqlalchemy.sql.elements import or_
 
 from arvados.keepcache._common import to_bytes, datetime_to_unix_time, \
-    unix_time_to_datetime
+    unix_time_to_datetime, ONE_MB
 from arvados.keepcache._locks import GlobalLock
-from arvados.keepcache.block_store_records import BlockRecord, BlockGetRecord, \
+from arvados.keepcache.block_store_records import BlockGetRecord, \
     BlockPutRecord, BlockDeleteRecord, InMemoryBlockDeleteRecord, \
     InMemoryBlockPutRecord, InMemoryBlockGetRecord, SqlAlchemyBlockDeleteRecord, \
     SqlAlchemyBlockPutRecord, SqlAlchemyBlockGetRecord, SqlAlchemyModel
+
+_logger = logging.getLogger(__name__)
 
 
 class BlockStoreBookkeeper(object):
@@ -74,7 +77,6 @@ class BlockStoreBookkeeper(object):
         :rtype: Set[BlockPutRecord]
         """
         locator_records = dict()  # type: Dict[str, Record]
-
         for record in self.get_all_put_records() \
                 | self.get_all_delete_records():
             if record.locator not in locator_records:
@@ -320,7 +322,7 @@ class LMDBBlockStoreBookkeeper(BlockStoreBookkeeper):
         :param lmdb_directory: the directory to be used with LMDB.
         :type lmdb_directory: str
         """
-        self._environment = lmdb.open(lmdb_directory, max_dbs=4)
+        self._environment = lmdb.open(lmdb_directory, max_dbs=4, map_size=100 * ONE_MB)
         self._put_database = self._environment.open_db(
             LMDBBlockStoreBookkeeper._PUT_DATABASE_NAME, dupsort=True)
         self._get_database = self._environment.open_db(
@@ -336,22 +338,25 @@ class LMDBBlockStoreBookkeeper(BlockStoreBookkeeper):
         }
 
     def record_get(self, locator):
-        self._record(self._get_database, locator)
+        with self._environment.begin(write=True, db=self._get_database) as transaction:
+            transaction.put(to_bytes(locator), self._get_database_insertable_timestamp())
 
     def record_put(self, locator, content_size):
-        self._record(self._put_database, locator)
-        with self._environment.begin(db=self._size_database, write=True) as transaction:
-            transaction.put(locator, to_bytes(content_size))
+        locator = to_bytes(locator)
+        with self._environment.begin(write=True) as transaction:
+            transaction.put(locator, self._get_database_insertable_timestamp(), db=self._put_database)
+            transaction.put(locator, to_bytes(content_size), db=self._size_database)
 
     def record_delete(self, locator):
-        self._record(self._delete_database, locator)
+        with self._environment.begin(write=True, db=self._delete_database) as transaction:
+            transaction.put(to_bytes(locator), self._get_database_insertable_timestamp())
 
     def _get_all_records_of_type(self, record_type, locators, since):
         database = self._type_database_mapping[record_type]
         record_type = LMDBBlockStoreBookkeeper._RECORD_TO_IN_MEMORY_RECORD[record_type]
         records = set()     # type: Set[Record]
 
-        with self._environment.begin(db=database) as transaction:
+        with self._environment.begin() as transaction:
             with transaction.cursor(db=database) as cursor:
                 for _, locator in enumerate(cursor.iternext(values=False)):
                     # XXX: If filter, could iterate on locators instead
@@ -362,24 +367,18 @@ class LMDBBlockStoreBookkeeper(BlockStoreBookkeeper):
                                 if not issubclass(record_type, BlockPutRecord):
                                     record = record_type(locator, timestamp)
                                 else:
-                                    # XXX: Could keep this transaction open if getting puts
-                                    with self._environment.begin(db=self._size_database) as size_transaction:
-                                        size = int(size_transaction.get(to_bytes(locator)))
+                                    size = int(transaction.get(to_bytes(locator), db=self._size_database))
                                     record = record_type(locator, timestamp, size)
                                 records.add(record)
                         # Move cursor back to continue iteration through keys
                         cursor.last_dup()
         return records
 
-    def _record(self, database, locator):
+    def _get_database_insertable_timestamp(self):
         """
-        Records timestamped use of the given locator in the given database.
-        :param database: the database to be used
-        :type database: _Database
-        :param locator: locator to record use of
-        :type locator: str
+        Gets the current timestamp in a form that can be inserted into the
+        database.
+        :return: the current timestamp, storable in LMDB
+        :rtype: bytearray
         """
-        locator = to_bytes(locator)
-        unix_time = to_bytes(datetime_to_unix_time(self._get_current_timestamp()))
-        with self._environment.begin(db=database, write=True) as transaction:
-            transaction.put(locator, unix_time)
+        return to_bytes(datetime_to_unix_time(self._get_current_timestamp()))
