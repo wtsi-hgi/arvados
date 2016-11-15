@@ -19,19 +19,22 @@ def to_bytes(value):
 
 def datetime_to_unix_time(timestamp):
     """
-    TODO
+    Converts the given datetime to UNIX time.
     :param timestamp: timestamp to convert (must be in UTC)
     :type timestamp: datetime
-    :return:
+    :return: the datetime as UNIX time (in seconds)
+    :rtype: int
     """
     return (timestamp - datetime.utcfromtimestamp(0)).total_seconds()
 
 
 def unix_time_to_datetime(unix_time):
     """
-    TODO
-    :param unix_time:
-    :return:
+    Converts the given UNIX time to an equivalent Python datetime object.
+    :param unix_time: the UNIX time
+    :type unix_time: int
+    :return: the datatime equivalent
+    :rtype: datetime
     """
     unix_time = float(unix_time)
     return datetime.utcfromtimestamp(unix_time)

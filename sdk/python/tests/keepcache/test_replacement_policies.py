@@ -3,8 +3,8 @@ from abc import ABCMeta, abstractmethod
 
 from arvados.keepcache.block_store_bookkeepers import \
     InMemoryBlockStoreBookkeeper
-from arvados.keepcache.replacement_policies import FIFOCacheReplacementPolicy, \
-    LastUsedReplacementPolicy, CacheReplacementPolicy
+from arvados.keepcache.replacement_policies import LastUsedReplacementPolicy, \
+    FIFOCacheReplacementPolicy, CacheReplacementPolicy
 from tests.keepcache._common import LOCATOR_1, LOCATOR_2
 
 _CONTENT_SIZE = 10

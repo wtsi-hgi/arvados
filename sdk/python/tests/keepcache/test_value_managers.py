@@ -3,7 +3,8 @@ from abc import ABCMeta, abstractmethod
 
 import lmdb
 
-from arvados.keepcache._value_managers import InMemoryValueManager, LMDBValueManager
+from arvados.keepcache._value_managers import InMemoryValueManager, \
+    LMDBValueManager
 from tests.keepcache._common import TempManager
 
 

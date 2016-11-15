@@ -1,5 +1,7 @@
 from abc import ABCMeta, abstractmethod
 
+import lmdb
+
 from arvados.keepcache._common import to_bytes
 
 
@@ -46,11 +48,9 @@ class InMemoryValueManager(ValueManager):
         """
         Constructor.
         """
-        # XXX: The computer scientist in me is not amused by use of this data
-        # structure... However, adding a dependency on a library providing a
-        # better structure cannot justified for the purpose of  making an
-        # implementation (which will probably just be used in testing) more
-        # efficient
+        # XXX: Adding a dependency on a library providing a better structure
+        # cannot justified for the purpose of making an implementation (which
+        # will probably just be used in testing) more efficient
         self._values = dict()
 
     def remove_value(self, identifier):
@@ -74,12 +74,14 @@ class LMDBValueManager(ValueManager):
     def __init__(self, environment, database=None):
         """
         Constructor.
-        :param environment: the LMDB environment
-        :type environment: Environment
+        :param environment: the LMDB environment or a directory where it is to
+        be created
+        :type environment: Union[Environment, str]
         :param database: the LMDB sub-database to use (if any)
         :type database: Optional[Union[handle, str]]
         """
-        self._environment = environment
+        self._environment = lmdb.open(environment) \
+            if isinstance(environment, str) else environment
         self._database_handle = environment.open(database) \
             if isinstance(database, str) else database
 

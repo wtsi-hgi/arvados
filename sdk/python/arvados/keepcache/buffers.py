@@ -1,8 +1,5 @@
 import logging
-import os
-import threading
 from abc import ABCMeta, abstractmethod
-from uuid import uuid4
 
 _logger = logging.getLogger(__name__)
 
@@ -44,7 +41,8 @@ class PseudoBuffer(object):
 
 class OpeningBuffer(PseudoBuffer):
     """
-    LMDB transaction buffer.
+    LMDB transaction buffer. Locks on read to escape "wedging" issues at the
+    cost of a performance hit.
     """
     class _BufferIterator(object):
         """
@@ -53,7 +51,7 @@ class OpeningBuffer(PseudoBuffer):
         def __init__(self, parent):
             """
             Constructor.
-            :param parent: TODO
+            :param parent: the parent `OpeningBuffer` object
             :type: OpeningBuffer
             """
             self.parent = parent
@@ -78,9 +76,10 @@ class OpeningBuffer(PseudoBuffer):
         Constructor.
         :param locator: locator holding the buffer
         :type locator: bytes
-        :param environment: TODO
+        :param environment: the LMDB environment
         :type: Environment
-        :param transaction_lock: TODO
+        :param transaction_lock: lock used to get exclusive access to the LMDB
+        database
         :type: Lock
         """
         self.locator = locator
