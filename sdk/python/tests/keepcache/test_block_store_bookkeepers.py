@@ -2,7 +2,6 @@ import unittest
 from abc import ABCMeta, abstractmethod
 from datetime import datetime
 
-import lmdb
 from mock import MagicMock
 
 from arvados.keepcache.block_store_bookkeepers import \
@@ -10,7 +9,8 @@ from arvados.keepcache.block_store_bookkeepers import \
     LMDBBlockStoreBookkeeper
 from arvados.keepcache.block_store_records import BlockGetRecord, \
     BlockPutRecord, BlockDeleteRecord
-from tests.keepcache._common import CONTENTS, LOCATORS, TempManager
+from tests.keepcache._common import CONTENTS, LOCATORS, TempManager, LOCATOR_1, \
+    LOCATOR_2
 
 
 class _TestBlockStoreBookkeeper(unittest.TestCase):
@@ -229,6 +229,25 @@ class TestLMDBBlockStoreBookkeeper(_TestBlockStoreBookkeeper):
 
     def tearDown(self):
         self._temp_directory_manager.remove_all()
+
+    def test_record_get_with_buffer(self):
+        self.bookkeeper.get_record_batch_size = 2
+        self.bookkeeper.record_get(LOCATOR_1)
+        self.assertEqual(0, len(self.bookkeeper.get_all_get_records()))
+        self.bookkeeper.record_get(LOCATOR_2)
+        self.assertEqual(2, len(self.bookkeeper.get_all_get_records()))
+
+    def test_record_get_buffer_flushed_on_reference_lost(self):
+        directory = self._temp_directory_manager.create_directory()
+        bookkeeper = LMDBBlockStoreBookkeeper(
+            directory, get_record_batch_size=2)
+        bookkeeper.record_get(LOCATOR_1)
+        self.assertEqual(0, len(bookkeeper.get_all_get_records()))
+        del bookkeeper
+        bookkeeper = LMDBBlockStoreBookkeeper(directory)
+        records = bookkeeper.get_all_get_records()
+        self.assertEqual(1, len(records))
+        self.assertEqual(LOCATOR_1, list(records)[0].locator)
 
     def _create_bookkeeper(self):
         database_location = self._temp_directory_manager.create_directory()

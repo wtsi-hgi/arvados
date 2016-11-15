@@ -10,12 +10,13 @@ from sqlalchemy.sql import func
 from sqlalchemy.sql.elements import or_
 
 from arvados.keepcache._common import to_bytes, datetime_to_unix_time, \
-    unix_time_to_datetime, ONE_MB
+    unix_time_to_datetime, ONE_GB
 from arvados.keepcache._locks import GlobalLock
 from arvados.keepcache.block_store_records import BlockGetRecord, \
     BlockPutRecord, BlockDeleteRecord, InMemoryBlockDeleteRecord, \
-    InMemoryBlockPutRecord, InMemoryBlockGetRecord, SqlAlchemyBlockDeleteRecord, \
-    SqlAlchemyBlockPutRecord, SqlAlchemyBlockGetRecord, SqlAlchemyModel
+    InMemoryBlockPutRecord, InMemoryBlockGetRecord, \
+    SqlAlchemyBlockDeleteRecord, SqlAlchemyBlockPutRecord, \
+    SqlAlchemyBlockGetRecord, SqlAlchemyModel
 
 _logger = logging.getLogger(__name__)
 
@@ -305,6 +306,8 @@ class LMDBBlockStoreBookkeeper(BlockStoreBookkeeper):
     """
     LMDB backed block store bookkeeper.
     """
+    DEFAULT_MAX_DATABASE_SIZE = 1 * ONE_GB
+
     _PUT_DATABASE_NAME = "Put"
     _GET_DATABASE_NAME = "Get"
     _DELETE_DATABASE_NAME = "Delete"
@@ -316,13 +319,18 @@ class LMDBBlockStoreBookkeeper(BlockStoreBookkeeper):
         BlockDeleteRecord: InMemoryBlockDeleteRecord
     }
 
-    def __init__(self, lmdb_directory):
+    def __init__(self, lmdb_directory, max_database_size=DEFAULT_MAX_DATABASE_SIZE,
+                 get_record_batch_size=1):
         """
         Constructor.
         :param lmdb_directory: the directory to be used with LMDB.
         :type lmdb_directory: str
+        :param max_database_size: the maximum size that the database can grow to in bytes
+        :type: max_database_size: int
+        :param get_record_batch_size: TODO
+        :type get_record_batch_size: int
         """
-        self._environment = lmdb.open(lmdb_directory, max_dbs=4, map_size=100 * ONE_MB)
+        self._environment = lmdb.open(lmdb_directory, max_dbs=4, map_size=max_database_size)
         self._put_database = self._environment.open_db(
             LMDBBlockStoreBookkeeper._PUT_DATABASE_NAME, dupsort=True)
         self._get_database = self._environment.open_db(
@@ -336,10 +344,19 @@ class LMDBBlockStoreBookkeeper(BlockStoreBookkeeper):
             BlockPutRecord: self._put_database,
             BlockDeleteRecord: self._delete_database
         }
+        self.get_record_batch_size = get_record_batch_size
+        self._get_record_buffer = []     # List[BlockGetRecord]
+
+    def __del__(self):
+        try:
+            self._flush_get_record_buffer()
+        except AttributeError:
+            """ The constructor did not complete """
 
     def record_get(self, locator):
-        with self._environment.begin(write=True, db=self._get_database) as transaction:
-            transaction.put(to_bytes(locator), self._get_database_insertable_timestamp())
+        self._get_record_buffer.append((locator, self._get_database_insertable_timestamp()))
+        if len(self._get_record_buffer) >= self.get_record_batch_size:
+            self._flush_get_record_buffer()
 
     def record_put(self, locator, content_size):
         locator = to_bytes(locator)
@@ -373,6 +390,16 @@ class LMDBBlockStoreBookkeeper(BlockStoreBookkeeper):
                         # Move cursor back to continue iteration through keys
                         cursor.last_dup()
         return records
+
+    def _flush_get_record_buffer(self):
+        """
+        Fluesh the get record buffer.
+        """
+        if len(self._get_record_buffer) > 0:
+            with self._environment.begin(write=True, db=self._get_database) as transaction:
+                while len(self._get_record_buffer) > 0:
+                    locator, timestamp = self._get_record_buffer.pop()
+                    transaction.put(to_bytes(locator), timestamp)
 
     def _get_database_insertable_timestamp(self):
         """

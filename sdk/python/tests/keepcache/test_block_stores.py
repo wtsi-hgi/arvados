@@ -8,8 +8,7 @@ from types import MethodType
 
 from arvados.keepcache.block_load_managers import InMemoryBlockLoadManager
 from arvados.keepcache.block_store_bookkeepers import \
-    InMemoryBlockStoreBookkeeper, BlockPutRecord, \
-    BlockDeleteRecord
+    InMemoryBlockStoreBookkeeper
 from arvados.keepcache.block_store_records import BlockGetRecord, \
     BlockPutRecord, BlockDeleteRecord
 from arvados.keepcache.block_stores import LMDBBlockStore, \
@@ -249,12 +248,6 @@ class TestBookkeepingBlockStore(_TestBlockStore):
         self.assertEqual(1, len(records))
         self.assertIsInstance(records[0], BlockGetRecord)
         self.assertEqual(LOCATOR_1, records[0].locator)
-
-    def test_records_get_when_records_not_enabled(self):
-        self.block_store.record_gets = False
-        self.block_store.get(LOCATOR_1)
-        records = list(self.bookkeeper.get_all_records())
-        self.assertEqual(0, len(records))
 
     def test_records_put(self):
         self.block_store.put(LOCATOR_1, CONTENTS)

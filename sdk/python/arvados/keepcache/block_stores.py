@@ -117,9 +117,6 @@ class LMDBBlockStore(BlockStore):
     """
     Block store backed by Lightning Memory-Mapped Database (LMDB).
 
-    TLDR: LMDB does not like being a cache so has to be restrained with locks.
-    If you want to put 10GB of data in the block store, make LMDB 20GB.
-
     LMDB uses the concept of Multi-Version Concurrency Control (MVCC) to reduce
     its use of locks. When read transactions are started, they get a snapshot
     view of the database, which is isolated against additional writes. The
@@ -128,13 +125,10 @@ class LMDBBlockStore(BlockStore):
     larger than naively expected.
 
     LMDB requires its maximum size to be defined upon creation; if this size is
-    exceeded, an error will be raised. Unless the size of disk exceeds the total
-    size of all data that is going to be put in the cache (i.e. all data can fit
-    in the cache at the same time), users of LMDB have to worry about the total
-    size of the database. This will inevitably involve the use of locks, which
-    ultimately reverts the work of LMDB's creators to remove the need for locks.
-    (It suggests that LMDB is intended to be able to grow big enough to store
-    all data and is therefore a questionable choice for a cache...).
+    exceeded, an error will be raised. Unless the size of disk exceeds the
+    total size of all data that is going to be put in the cache (i.e. all data
+    can fit in the cache at the same time), users of LMDB have to worry about
+    the total size of the database.
 
     To add to the woes of using LMDB: in order to freely write and re-write
     data, empirical evidence strongly suggests that only 50% of the size of an
@@ -145,9 +139,7 @@ class LMDBBlockStore(BlockStore):
     """
     _HEADER_SIZE = 16
 
-    # FIXME: Just accept LMDB database
-    def __init__(self, directory, max_size, max_readers=126,
-                 max_spare_transactions=2):
+    def __init__(self, directory, max_size):
         """
         Constructor.
         :param directory: the directory to use for the database (will create if
@@ -156,16 +148,6 @@ class LMDBBlockStore(BlockStore):
         :type directory: str
         :param max_size: maximum size that the database can grow to in bytes
         :type max_size: int
-        :param max_readers: the maximum number of readers. An error will be
-        raised if the supply of readers is extinguished. LMDB's creator states
-        that a thread may only "have" one transaction at a time
-        (http://www.openldap.org/lists/openldap-devel/201409/msg00001.html).
-        Therefore this should be set to the maximum number of threads that can
-        access the database
-        :type max_readers: int
-        :param max_spare_transactions: maximum number of transactions to keep
-        close to hand
-        :type max_spare_transactions: int
         """
         if not os.path.exists(directory):
             # Surround in try to cope with race condition
@@ -181,8 +163,7 @@ class LMDBBlockStore(BlockStore):
             os.path.join(directory, "access.lock"))
         with self._exclusive_write_access:
             self._environment = lmdb.open(
-                directory, writemap=True, map_size=max_size,
-                max_readers=max_readers, max_spare_txns=max_spare_transactions)
+                directory, writemap=True, map_size=max_size)
         self._max_size = max_size
         self._transaction_lock = Lock()
 
@@ -215,7 +196,6 @@ class LMDBBlockStore(BlockStore):
         _logger.debug("Putting value of %d bytes for `%s` in LMDB"
                       % (len(content), locator))
 
-        # TODO: Transaction lock required for write transaction?
         with self._transaction_lock:
             with self._environment.begin(write=True) as transaction:
                 transaction.put(locator, content)
@@ -224,7 +204,6 @@ class LMDBBlockStore(BlockStore):
         locator = to_bytes(locator)
 
         _logger.debug("Deleting value for `%s` in LMDB" % locator)
-        # TODO: Transaction lock required for write transaction?
         with self._transaction_lock:
             with self._environment.begin(write=True) as transaction:
                 deleted = transaction.delete(locator)
@@ -248,8 +227,6 @@ class LMDBBlockStore(BlockStore):
         :return: the usable size in bytes
         :rtype: int
         """
-        # TODO: Ignoring space that cannot be used because it has been "wedged"
-        # open by readers
         page_size = self._get_page_size()
         # Fixed cost (e.g. the pointer to the data root, free list root, etc)
         fixed_cost = 4 * page_size + LMDBBlockStore._HEADER_SIZE
@@ -357,21 +334,17 @@ class BookkeepingBlockStore(BlockStore):
     Block store that uses a bookkeeper to record accesses and modifications to
     entries in an underlying block store.
     """
-    def __init__(self, block_store, bookkeeper, record_gets=False):
+    def __init__(self, block_store, bookkeeper):
         """
         Constructor.
         :param block_store: the block store to record use of
         :type block_store: BlockStore
         :param bookkeeper: bookkeeper in which block store usage is stored
         :type bookkeeper: BlockStoreBookkeeper
-        :param record_gets: whether data "gets" should be recorded. Disabled by default as the records are not needed to
-        determine what is in the block store and storing extra records can be costly with some bookkeeper
-        implementations
         """
         super(BookkeepingBlockStore, self).__init__()
         self._block_store = block_store
         self.bookkeeper = bookkeeper
-        self.record_gets = record_gets
 
     @property
     def exclusive_write_access(self):
@@ -381,8 +354,7 @@ class BookkeepingBlockStore(BlockStore):
         return self._block_store.exists(locator)
 
     def get(self, locator):
-        if self.record_gets:
-            self.bookkeeper.record_get(locator)
+        self.bookkeeper.record_get(locator)
         return self._block_store.get(locator)
 
     def put(self, locator, content):
