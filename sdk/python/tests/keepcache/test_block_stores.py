@@ -243,11 +243,18 @@ class TestBookkeepingBlockStore(_TestBlockStore):
         self.bookkeeper = self.block_store.bookkeeper
 
     def test_records_get(self):
+        self.block_store.record_gets = True
         self.block_store.get(LOCATOR_1)
         records = list(self.bookkeeper.get_all_records())
         self.assertEqual(1, len(records))
         self.assertIsInstance(records[0], BlockGetRecord)
         self.assertEqual(LOCATOR_1, records[0].locator)
+
+    def test_records_get_when_records_not_enabled(self):
+        self.block_store.record_gets = False
+        self.block_store.get(LOCATOR_1)
+        records = list(self.bookkeeper.get_all_records())
+        self.assertEqual(0, len(records))
 
     def test_records_put(self):
         self.block_store.put(LOCATOR_1, CONTENTS)

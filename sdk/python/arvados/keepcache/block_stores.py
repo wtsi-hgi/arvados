@@ -357,17 +357,21 @@ class BookkeepingBlockStore(BlockStore):
     Block store that uses a bookkeeper to record accesses and modifications to
     entries in an underlying block store.
     """
-    def __init__(self, block_store, bookkeeper):
+    def __init__(self, block_store, bookkeeper, record_gets=False):
         """
         Constructor.
         :param block_store: the block store to record use of
         :type block_store: BlockStore
-        :param bookkeeper: bookkeeper
+        :param bookkeeper: bookkeeper in which block store usage is stored
         :type bookkeeper: BlockStoreBookkeeper
+        :param record_gets: whether data "gets" should be recorded. Disabled by default as the records are not needed to
+        determine what is in the block store and storing extra records can be costly with some bookkeeper
+        implementations
         """
         super(BookkeepingBlockStore, self).__init__()
         self._block_store = block_store
         self.bookkeeper = bookkeeper
+        self.record_gets = record_gets
 
     @property
     def exclusive_write_access(self):
@@ -377,7 +381,8 @@ class BookkeepingBlockStore(BlockStore):
         return self._block_store.exists(locator)
 
     def get(self, locator):
-        self.bookkeeper.record_get(locator)
+        if self.record_gets:
+            self.bookkeeper.record_get(locator)
         return self._block_store.get(locator)
 
     def put(self, locator, content):
