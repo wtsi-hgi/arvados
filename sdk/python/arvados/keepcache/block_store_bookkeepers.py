@@ -356,6 +356,7 @@ class LMDBBlockStoreBookkeeper(BlockStoreBookkeeper):
     def record_get(self, locator):
         self._get_record_buffer.append((locator, self._get_database_insertable_timestamp()))
         if len(self._get_record_buffer) >= self.get_record_batch_size:
+
             self._flush_get_record_buffer()
 
     def record_put(self, locator, content_size):
@@ -363,10 +364,12 @@ class LMDBBlockStoreBookkeeper(BlockStoreBookkeeper):
         with self._environment.begin(write=True) as transaction:
             transaction.put(locator, self._get_database_insertable_timestamp(), db=self._put_database)
             transaction.put(locator, to_bytes(content_size), db=self._size_database)
+            self._put_buffered_get_records(transaction)
 
     def record_delete(self, locator):
         with self._environment.begin(write=True, db=self._delete_database) as transaction:
             transaction.put(to_bytes(locator), self._get_database_insertable_timestamp())
+            self._put_buffered_get_records(transaction)
 
     def _get_all_records_of_type(self, record_type, locators, since):
         database = self._type_database_mapping[record_type]
@@ -393,13 +396,21 @@ class LMDBBlockStoreBookkeeper(BlockStoreBookkeeper):
 
     def _flush_get_record_buffer(self):
         """
-        Fluesh the get record buffer.
+        Flush the get record buffer.
         """
         if len(self._get_record_buffer) > 0:
             with self._environment.begin(write=True, db=self._get_database) as transaction:
-                while len(self._get_record_buffer) > 0:
-                    locator, timestamp = self._get_record_buffer.pop()
-                    transaction.put(to_bytes(locator), timestamp)
+                self._put_buffered_get_records(transaction)
+
+    def _put_buffered_get_records(self, transaction):
+        """
+        Puts the buffered get records into LMDB using the given write transaction.
+        :param transaction: write transaction to LMDB
+        :type: lmdb._Transaction
+        """
+        while len(self._get_record_buffer) > 0:
+            locator, timestamp = self._get_record_buffer.pop()
+            transaction.put(to_bytes(locator), timestamp, db=self._get_database)
 
     def _get_database_insertable_timestamp(self):
         """

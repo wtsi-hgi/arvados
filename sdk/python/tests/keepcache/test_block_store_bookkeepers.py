@@ -249,6 +249,20 @@ class TestLMDBBlockStoreBookkeeper(_TestBlockStoreBookkeeper):
         self.assertEqual(1, len(records))
         self.assertEqual(LOCATOR_1, list(records)[0].locator)
 
+    def test_record_put_puts_buffered_gets(self):
+        self.bookkeeper.get_record_batch_size = 20
+        self.bookkeeper.record_get(LOCATOR_1)
+        self.assertEqual(0, len(self.bookkeeper.get_all_records()))
+        self.bookkeeper.record_put(LOCATOR_1, len(CONTENTS))
+        self.assertEqual(2, len(self.bookkeeper.get_all_records()))
+
+    def test_record_delete_puts_buffered_gets(self):
+        self.bookkeeper.get_record_batch_size = 20
+        self.bookkeeper.record_get(LOCATOR_1)
+        self.assertEqual(0, len(self.bookkeeper.get_all_records()))
+        self.bookkeeper.record_delete(LOCATOR_1)
+        self.assertEqual(2, len(self.bookkeeper.get_all_records()))
+
     def _create_bookkeeper(self):
         database_location = self._temp_directory_manager.create_directory()
         return LMDBBlockStoreBookkeeper(database_location)
