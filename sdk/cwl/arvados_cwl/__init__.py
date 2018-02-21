@@ -480,25 +480,31 @@ class ArvCwlRunner(object):
             # except when in cond.wait(), at which point on_message can update
             # job state and process output callbacks.
 
-            loopperf = Perf(metrics, "jobiter")
-            loopperf.__enter__()
-            for runnable in jobiter:
-                loopperf.__exit__()
+            with ThreadPoolExecutor() as tp:
+                #loopperf = Perf(metrics, "jobiter")
+                #loopperf.__enter__()
+                job_iter_task = tp.submit(next, jobiter)
+                try:
+                    while True:
+                        runnable = job_iter_task.result()
+                        #loopperf.__exit__()
 
-                if self.stop_polling.is_set():
-                    break
+                        if self.stop_polling.is_set():
+                            break
 
-                if runnable:
-                    with Perf(metrics, "run"):
-                        runnable.run(**kwargs)
-                else:
-                    if self.processes:
-                        self.cond.wait(1)
-                    else:
-                        logger.error("Workflow is deadlocked, no runnable jobs and not waiting on any pending jobs.")
-                        break
-                loopperf.__enter__()
-            loopperf.__exit__()
+                        if runnable:
+                            job_iter_task = tp.submit(next, jobiter)
+                            with Perf(metrics, "run"):
+                                runnable.run(**kwargs)
+                        else:
+                            if self.processes:
+                                self.cond.wait(1)
+                                job_iter_task = tp.submit(next, jobiter)
+                            else:
+                                logger.error("Workflow is deadlocked, no runnable jobs and not waiting on any pending jobs.")
+                                break
+                #loopperf.__enter__()
+            #loopperf.__exit__()
 
             while self.processes:
                 self.cond.wait(1)
