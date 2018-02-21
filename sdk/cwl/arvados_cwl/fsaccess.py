@@ -54,7 +54,8 @@ class CollectionCache(object):
             if pdh not in self.collections:
                 logger.debug("Creating collection reader for %s", pdh)
                 cr = arvados.collection.CollectionReader(pdh, api_client=self.api_client,
-                                                         keep_client=self.keep_client)
+                                                         keep_client=self.keep_client,
+                                                         num_retries=self.num_retries)
                 sz = len(cr.manifest_text()) * 128
                 self.collections[pdh] = (cr, sz)
                 self.total += sz
