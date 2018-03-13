@@ -45,6 +45,10 @@ from cwltool.pathmapper import adjustFileObjs, adjustDirObjs, get_listing
 from cwltool.draft2tool import compute_checksums
 from arvados.api import OrderedJsonModel
 
+import cProfile, pstats, StringIO
+
+from multiprocessing.pool import ThreadPool
+
 logger = logging.getLogger('arvados.cwl-runner')
 metrics = logging.getLogger('arvados.cwl-runner.metrics')
 logger.setLevel(logging.INFO)
@@ -104,6 +108,12 @@ class ArvCwlRunner(object):
                 raise Exception("No supported APIs")
             else:
                 raise Exception("Unsupported API '%s', expected one of %s" % (work_api, expected_api))
+
+        self.cwl_jobs_pool = ThreadPool()
+        self.exceptions = []
+        self.on_jobs_done = threading.Event()
+        self.running_cwl_submit_jobs = set()
+        self.num_jobs_submitted = 0
 
     def arv_make_tool(self, toolpath_object, **kwargs):
         kwargs["work_api"] = self.work_api
@@ -341,6 +351,50 @@ class ArvCwlRunner(object):
                                        'progress':1.0
                                    }).execute(num_retries=self.num_retries)
 
+    def wait_for_cwl_jobs_done(self):  # type: () -> None
+        logger.warning("Waiting for CWL jobs to be avaliable")
+        self.on_jobs_done.wait(10)
+        logger.warning("CWL jobs may be avaliable")
+
+        if self.exceptions:
+            raise self.exceptions[0]
+
+    def run_job(self,
+                job, # type:  JobBase
+                **kwargs  # type:  Any
+                ):
+        # type: (...) -> None
+        def done_job(return_value):
+            if return_value is not None:
+                error = return_value
+                logger.warning("Got exception" + str(error))
+                if not isinstance(error, WorkflowException):
+                    error = WorkflowException(str(error))
+
+                self.exceptions.append(error)
+
+            logger.warning("Finished job submission")
+
+            self.running_cwl_submit_jobs.remove(job_num)
+            self.on_jobs_done.set()
+
+        def submit_job(**kwargs):
+            logger.warning("Job being run in job pool")
+            try:
+                job.run(**kwargs)
+            except Exception as e:
+                return e
+
+            return
+
+        self.num_jobs_submitted += 1
+        job_num = self.num_jobs_submitted
+        self.running_cwl_submit_jobs.add(job_num)
+
+        logger.warning("Submitting job to jobs pool")
+        self.on_jobs_done.clear()
+        self.cwl_jobs_pool.apply_async(submit_job, kwds=kwargs, callback=done_job)
+
     def arv_executor(self, tool, job_order, **kwargs):
         self.debug = kwargs.get("debug")
 
@@ -480,6 +534,13 @@ class ArvCwlRunner(object):
                                self.output_callback,
                                **kwargs)
 
+        def print_stats_stderr(pf):
+            s = StringIO.StringIO()
+            sortby = 'cumulative'
+            ps = pstats.Stats(pf, stream=s).sort_stats(sortby)
+            ps.print_stats()
+            logger.warning(s.getvalue())
+
         try:
             self.cond.acquire()
             # Will continue to hold the lock for the duration of this code
@@ -488,6 +549,8 @@ class ArvCwlRunner(object):
 
             loopperf = Perf(metrics, "jobiter")
             loopperf.__enter__()
+            pf = cProfile.Profile()
+            pf.enable()
             for runnable in jobiter:
                 loopperf.__exit__()
 
@@ -496,15 +559,32 @@ class ArvCwlRunner(object):
 
                 if runnable:
                     with Perf(metrics, "run"):
-                        runnable.run(**kwargs)
+                        self.run_job(runnable, **kwargs)
                 else:
-                    if self.processes:
+                    if self.running_cwl_submit_jobs:
+                        self.wait_for_cwl_jobs_done()
+                    elif self.processes:
                         self.cond.wait(1)
                     else:
                         logger.error("Workflow is deadlocked, no runnable jobs and not waiting on any pending jobs.")
                         break
+                logger.warning("Printing stats")
+                print_stats_stderr(pf)
+                pf = cProfile.Profile()
+                pf.enable()
                 loopperf.__enter__()
             loopperf.__exit__()
+            pf.disable()
+            logger.warning("Printing stats")
+            print_stats_stderr(pf)
+
+            logger.warning("Submitted all CWL jobs, waiting for them to finish")
+            self.cwl_jobs_pool.close()
+            self.cwl_jobs_pool.join()
+            logger.warning("All cwl jobs sumbitted")
+
+            for exception in self.exceptions:
+                raise exception
 
             while self.processes:
                 self.cond.wait(1)
