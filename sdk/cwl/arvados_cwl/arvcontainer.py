@@ -316,8 +316,8 @@ class RunnerContainer(Runner):
             "container_image": arvados_jobs_image(self.arvrunner, self.jobs_image),
             "mounts": {
                 "/var/lib/cwl/cwl.input.json": {
-                    "kind": "json",
-                    "content": self.job_order
+                    "kind": "text",
+                    "content": "%s" % self.job_order
                 },
                 "stdout": {
                     "kind": "file",
@@ -350,8 +350,8 @@ class RunnerContainer(Runner):
             packed = packed_workflow(self.arvrunner, self.tool, self.merged_map)
             workflowpath = "/var/lib/cwl/workflow.json#main"
             container_req["mounts"]["/var/lib/cwl/workflow.json"] = {
-                "kind": "json",
-                "content": packed
+                "kind": "text",
+                "content": "%s" % packed
             }
             if self.tool.tool.get("id", "").startswith("arvwf:"):
                 container_req["properties"]["template_uuid"] = self.tool.tool["id"][6:33]
