@@ -192,7 +192,9 @@ SPDX-License-Identifier: AGPL-3.0 %>
               <%
                 mounts = current_obj.send(:mounts) if current_obj.respond_to?(:mounts)
                 input_obj = mounts.andand[:"/var/lib/cwl/cwl.input.json"].andand[:content]
-                mnt_inputs = JSON.pretty_generate(input_obj) if input_obj
+                input_kind = mounts.andand[:"/var/lib/cwl/cwl.input.json"].andand[:kind]
+                mnt_inputs = input_obj
+                mnt_inputs = JSON.pretty_generate(input_obj) if input_obj and input_kind == "json"
               %>
               <% if mnt_inputs %>
                 <tr>
