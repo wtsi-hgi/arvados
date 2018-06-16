@@ -317,7 +317,7 @@ class RunnerContainer(Runner):
             "mounts": {
                 "/var/lib/cwl/cwl.input.json": {
                     "kind": "text",
-                    "content": "%s" % self.job_order
+                    "content": "%s" % self.job_order.to_json
                 },
                 "stdout": {
                     "kind": "file",
@@ -351,7 +351,7 @@ class RunnerContainer(Runner):
             workflowpath = "/var/lib/cwl/workflow.json#main"
             container_req["mounts"]["/var/lib/cwl/workflow.json"] = {
                 "kind": "text",
-                "content": "%s" % packed
+                "content": "%s" % packed.to_json
             }
             if self.tool.tool.get("id", "").startswith("arvwf:"):
                 container_req["properties"]["template_uuid"] = self.tool.tool["id"][6:33]
