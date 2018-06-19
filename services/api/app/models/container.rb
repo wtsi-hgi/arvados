@@ -106,6 +106,7 @@ class Container < ArvadosModel
   # user-assigned priority and request creation time.
   def update_priority!
     return if ![Queued, Locked, Running].include?(state)
+    # ActiveRecord::Base.connection.execute('LOCK container_requests, containers IN EXCLUSIVE MODE')
     p = ContainerRequest.
         where('container_uuid=? and priority>0', uuid).
         includes(:requesting_container).
@@ -126,7 +127,7 @@ class Container < ArvadosModel
       # Update the priority of child container requests to match new
       # priority of the parent container (ignoring requests with no
       # container assigned, because their priority doesn't matter).
-      ActiveRecord::Base.connection.execute('LOCK container_requests, containers IN EXCLUSIVE MODE')
+      # ActiveRecord::Base.connection.execute('LOCK container_requests, containers IN EXCLUSIVE MODE')
       ContainerRequest.
         where(requesting_container_uuid: self.uuid,
               state: ContainerRequest::Committed).
@@ -319,7 +320,7 @@ class Container < ArvadosModel
       # Locking involves assigning auth_uuid, which involves looking
       # up container requests, so we must lock both tables in the
       # proper order to avoid deadlock.
-      ActiveRecord::Base.connection.execute('LOCK container_requests, containers IN EXCLUSIVE MODE')
+      # ActiveRecord::Base.connection.execute('LOCK container_requests, containers IN EXCLUSIVE MODE')
       reload
       check_lock_fail
       update_attributes!(state: Locked)
@@ -542,7 +543,7 @@ class Container < ArvadosModel
     if self.state_changed? and self.final?
       act_as_system_user do
 
-        ActiveRecord::Base.connection.execute('LOCK container_requests, containers IN EXCLUSIVE MODE')
+        # ActiveRecord::Base.connection.execute('LOCK container_requests, containers IN EXCLUSIVE MODE')
         if self.state == Cancelled
           retryable_requests = ContainerRequest.where("container_uuid = ? and priority > 0 and state = 'Committed' and container_count < container_count_max", uuid)
         else
@@ -562,11 +563,13 @@ class Container < ArvadosModel
           }
           c = Container.create! c_attrs
           retryable_requests.each do |cr|
-            cr.with_lock do
-              leave_modified_by_user_alone do
-                # Use row locking because this increments container_count
-                cr.container_uuid = c.uuid
-                cr.save!
+            transaction do
+              cr.with_lock do
+                leave_modified_by_user_alone do
+                  # Use row locking because this increments container_count
+                  cr.container_uuid = c.uuid
+                  cr.save!
+                end
               end
             end
           end
