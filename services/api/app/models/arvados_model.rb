@@ -765,35 +765,35 @@ class ArvadosModel < ActiveRecord::Base
   end
 
   def log_start_state
-    @old_attributes = Marshal.load(Marshal.dump(attributes))
-    @old_logged_attributes = Marshal.load(Marshal.dump(logged_attributes))
+    # @old_attributes = Marshal.load(Marshal.dump(attributes))
+    # @old_logged_attributes = Marshal.load(Marshal.dump(logged_attributes))
   end
 
   def log_change(event_type)
-    log = Log.new(event_type: event_type).fill_object(self)
-    yield log
-    log.save!
-    log_start_state
+    # log = Log.new(event_type: event_type).fill_object(self)
+    # yield log
+    # log.save!
+    # log_start_state
   end
 
   def log_create
-    log_change('create') do |log|
-      log.fill_properties('old', nil, nil)
-      log.update_to self
-    end
+    # log_change('create') do |log|
+    #   log.fill_properties('old', nil, nil)
+    #   log.update_to self
+    # end
   end
 
   def log_update
-    log_change('update') do |log|
-      log.fill_properties('old', etag(@old_attributes), @old_logged_attributes)
-      log.update_to self
-    end
+    # log_change('update') do |log|
+    #   log.fill_properties('old', etag(@old_attributes), @old_logged_attributes)
+    #   log.update_to self
+    # end
   end
 
   def log_destroy
-    log_change('delete') do |log|
-      log.fill_properties('old', etag(@old_attributes), @old_logged_attributes)
-      log.update_to nil
-    end
+    # log_change('delete') do |log|
+    #   log.fill_properties('old', etag(@old_attributes), @old_logged_attributes)
+    #   log.update_to nil
+    # end
   end
 end
