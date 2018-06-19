@@ -5,8 +5,11 @@
 require 'log_reuse_info'
 require 'whitelist_update'
 require 'safe_json'
+require 'new_relic/agent/method_tracer'
 
 class Container < ArvadosModel
+  include ::NewRelic::Agent::MethodTracer
+  extend ::NewRelic::Agent::MethodTracer
   include ArvadosModelUpdates
   include HasUuid
   include KindAndEtag
@@ -151,11 +154,14 @@ class Container < ArvadosModel
       scheduling_parameters: req.scheduling_parameters,
       secret_mounts: req.secret_mounts,
     }
-    act_as_system_user do
-      if req.use_existing && (reusable = find_reusable(c_attrs))
-        reusable
-      else
-        Container.create!(c_attrs)
+    self.class.trace_execution_scoped(['Custom/models::container/resolve::find_or_create']) do
+      act_as_system_user do
+        if req.use_existing && (reusable = find_reusable(c_attrs))
+          reusable
+        else
+          # ActiveRecord::Base.connection.execute('LOCK container_requests, containers IN EXCLUSIVE MODE')
+          Container.create!(c_attrs)
+        end
       end
     end
   end
@@ -549,56 +555,95 @@ class Container < ArvadosModel
           retryable_requests = []
         end
 
-        if retryable_requests.any?
-          c_attrs = {
-            command: self.command,
-            cwd: self.cwd,
-            environment: self.environment,
-            output_path: self.output_path,
-            container_image: self.container_image,
-            mounts: self.mounts,
-            runtime_constraints: self.runtime_constraints,
-            scheduling_parameters: self.scheduling_parameters
-          }
-          c = Container.create! c_attrs
-          retryable_requests.each do |cr|
-            cr.with_lock do
-              leave_modified_by_user_alone do
-                # Use row locking because this increments container_count
-                cr.container_uuid = c.uuid
-                cr.save!
+        self.class.trace_execution_scoped(['Custom/models::container/handle_completed::retry_create']) do
+          if retryable_requests.any?
+            c_attrs = {
+              command: self.command,
+              cwd: self.cwd,
+              environment: self.environment,
+              output_path: self.output_path,
+              container_image: self.container_image,
+              mounts: self.mounts,
+              runtime_constraints: self.runtime_constraints,
+              scheduling_parameters: self.scheduling_parameters
+            }
+            c = Container.create! c_attrs
+            retryable_requests.each do |cr|
+              cr.with_lock do
+                leave_modified_by_user_alone do
+                  # Use row locking because this increments container_count
+                  cr.container_uuid = c.uuid
+                  foo = nil
+                  self.class.trace_execution_scoped(['Custom/models::container/handle_completed::retry_create::cr_save']) do
+                    foo = cr.save!
+                  end
+                  foo
+                end
               end
             end
           end
         end
 
         # Notify container requests associated with this container
-        ContainerRequest.where(container_uuid: uuid,
-                               state: ContainerRequest::Committed).each do |cr|
-          leave_modified_by_user_alone do
-            cr.finalize!
-          end
-        end
-
-        # Cancel outstanding container requests made by this container.
-        ContainerRequest.
-          includes(:container).
-          where(requesting_container_uuid: uuid,
-                state: ContainerRequest::Committed).each do |cr|
-          leave_modified_by_user_alone do
-            cr.update_attributes!(priority: 0)
-            cr.container.reload
-            if cr.container.state == Container::Queued || cr.container.state == Container::Locked
-              # If the child container hasn't started yet, finalize the
-              # child CR now instead of leaving it "on hold", i.e.,
-              # Queued with priority 0.  (OTOH, if the child is already
-              # running, leave it alone so it can get cancelled the
-              # usual way, get a copy of the log collection, etc.)
-              cr.update_attributes!(state: ContainerRequest::Final)
+        self.class.trace_execution_scoped(['Custom/models::container/handle_completed::finalize']) do
+          ContainerRequest.where(container_uuid: uuid,
+                                 state: ContainerRequest::Committed).each do |cr|
+            leave_modified_by_user_alone do
+              cr.finalize!
             end
           end
         end
+        
+        cr = nil
+        self.class.trace_execution_scoped(['Custom/models::container/handle_completed::cancel_outstanding']) do
+          # Cancel outstanding container requests made by this container.
+          # ActiveRecord::Base.connection.execute('LOCK container_requests, containers IN EXCLUSIVE MODE')
+          cr = ContainerRequest.
+            includes(:container).
+            where(requesting_container_uuid: uuid,
+                  state: ContainerRequest::Committed).each do |cr|
+            leave_modified_by_user_alone do
+              cr.update_attributes!(priority: 0)
+              cr.container.reload
+              if cr.container.state == Container::Queued || cr.container.state == Container::Locked
+                # If the child container hasn't started yet, finalize the
+                # child CR now instead of leaving it "on hold", i.e.,
+                # Queued with priority 0.  (OTOH, if the child is already
+                # running, leave it alone so it can get cancelled the
+                # usual way, get a copy of the log collection, etc.)
+                cr.update_attributes!(state: ContainerRequest::Final)
+              end
+            end
+          end
+        end
+        cr
       end
     end
   end
+
+  class << self
+    include ::NewRelic::Agent::MethodTracer
+    add_method_tracer :readable_by, 'Custom/models::container/readable_by'
+    add_method_tracer :resolve, 'Custom/models::container/resolve'
+    add_method_tracer :find_reusable, 'Custom/models::container/find_reusable'
+    add_method_tracer :resolve_runtime_constraints, 'Custom/models::container/resolve_runtime_constraints'
+    add_method_tracer :resolve_mounts, 'Custom/models::container/resolve_mounts'
+    add_method_tracer :resolve_container_image, 'Custom/models::container/resolve_container_image'
+  end
+
+  add_method_tracer :fill_field_defaults, 'Custom/models::container/fill_field_defaults'
+  add_method_tracer :set_timestamps, 'Custom/models::container/set_timestamps'
+  add_method_tracer :assign_auth, 'Custom/models::container/assign_auth'
+  add_method_tracer :sort_serialized_attrs, 'Custom/models::container/sort_serialized_attrs'
+  add_method_tracer :update_secret_mounts_md5, 'Custom/models::container/update_secret_mounts_md5'
+  add_method_tracer :scrub_secret_mounts, 'Custom/models::container/scrub_secret_mounts'
+  add_method_tracer :handle_completed, 'Custom/models::container/handle_completed'
+  add_method_tracer :propagate_priority, 'Custom/models::container/propagate_priority'
+  add_method_tracer :update_priority!, 'Custom/models::container/update_priority!'
+  add_method_tracer :lock, 'Custom/models::container/lock'
+  add_method_tracer :unlock, 'Custom/models::container/unlock'
+  add_method_tracer :as_api_response, 'Custom/models::container/as_api_response'
+  add_method_tracer :validate_change, 'Custom/models::container/validate_change'
+  add_method_tracer :validate_lock, 'Custom/models::container/validate_lock'
+  add_method_tracer :validate_output, 'Custom/models::container/validate_output'
 end

@@ -3,8 +3,11 @@
 # SPDX-License-Identifier: AGPL-3.0
 
 require 'audit_logs'
+require 'new_relic/agent/method_tracer'
 
 class Log < ArvadosModel
+  include ::NewRelic::Agent::MethodTracer
+  extend ::NewRelic::Agent::MethodTracer
   include HasUuid
   include KindAndEtag
   include CommonApiTemplate
@@ -106,4 +109,14 @@ class Log < ArvadosModel
   def send_notify
     ActiveRecord::Base.connection.execute "NOTIFY logs, '#{self.id}'"
   end
+
+  class << self
+    include ::NewRelic::Agent::MethodTracer
+    add_method_tracer :readable_by, 'Custom/models::container/readable_by'
+  end
+
+  add_method_tracer :fill_object, 'Custom/models::log/fill_object'
+  add_method_tracer :fill_properties, 'Custom/models::log/fill_properties'
+  add_method_tracer :send_notify, 'Custom/models::log/send_notify'
+  add_method_tracer :update_to, 'Custom/models::log/update_to'
 end

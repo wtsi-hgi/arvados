@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: AGPL-3.0
 
+require 'new_relic/agent/method_tracer'
+
 module CommonApiTemplate
   def self.included(base)
     base.acts_as_api
@@ -34,7 +36,11 @@ module CommonApiTemplate
           template = :user
         end
       end
-      self.as_api_response_orig(template, opts)
+      res = nil
+      self.class.trace_execution_scoped(['Custom/common_api_template::as_api_response/wrap::as_api_response_orig']) do
+        res = self.as_api_response_orig(template, opts)
+      end
+      res
     end
   end
 

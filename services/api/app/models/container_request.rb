@@ -3,8 +3,10 @@
 # SPDX-License-Identifier: AGPL-3.0
 
 require 'whitelist_update'
+require 'new_relic/agent/method_tracer'
 
 class ContainerRequest < ArvadosModel
+  include ::NewRelic::Agent::MethodTracer
   include ArvadosModelUpdates
   include HasUuid
   include KindAndEtag
@@ -305,4 +307,17 @@ class ContainerRequest < ArvadosModel
       self.priority = c.priority>0 ? 1 : 0
     end
   end
+
+  add_method_tracer :finalize_if_needed, 'Custom/models::container_request/finalize_if_needed'
+  add_method_tracer :finalize!, 'Custom/models::container_request/finalize!'
+  add_method_tracer :set_container, 'Custom/models::container_request/set_container'
+  add_method_tracer :validate_runtime_constraints, 'Custom/models::container_request/validate_runtime_constraints'
+  add_method_tracer :validate_runtime_constraints, 'Custom/models::container_request/validate_runtime_constraints'
+  add_method_tracer :validate_scheduling_parameters, 'Custom/models::container_request/validate_scheduling_parameters'
+  add_method_tracer :update_priority, 'Custom/models::container_request/update_priority'
+  add_method_tracer :set_requesting_container_uuid, 'Custom/models::container_request/set_requesting_container_uuid'
+  add_method_tracer :set_priority_zero, 'Custom/models::container_request/set_priority_zero'
+  add_method_tracer :scrub_secret_mounts, 'Custom/models::container_request/scrub_secret_mounts'
+  add_method_tracer :as_api_response, 'Custom/models::container_request/as_api_response'
+
 end

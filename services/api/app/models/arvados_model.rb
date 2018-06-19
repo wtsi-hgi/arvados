@@ -7,8 +7,10 @@ require 'has_uuid'
 require 'record_filters'
 require 'serializers'
 require 'request_error'
+require 'new_relic/agent/method_tracer'
 
 class ArvadosModel < ActiveRecord::Base
+  include ::NewRelic::Agent::MethodTracer
   self.abstract_class = true
 
   include ArvadosModelUpdates
@@ -402,15 +404,23 @@ class ArvadosModel < ActiveRecord::Base
   protected
 
   def self.deep_sort_hash(x)
+    y = nil
     if x.is_a? Hash
-      x.sort.collect do |k, v|
+#      self.class.trace_execution_scoped(['Custom/models::arvados_model/deep_sort_hash::hash']) do
+      y = x.sort.collect do |k, v|
         [k, deep_sort_hash(v)]
       end.to_h
+#      end
     elsif x.is_a? Array
-      x.collect { |v| deep_sort_hash(v) }
+#      self.class.trace_execution_scoped(['Custom/models::arvados_model/deep_sort_hash::array']) do
+      y = x.collect { |v| deep_sort_hash(v) }
+#      end
     else
-      x
+#      self.class.trace_execution_scoped(['Custom/models::arvados_model/deep_sort_hash::scalar']) do
+      y = x
+#      end
     end
+    y
   end
 
   def ensure_ownership_path_leads_to_user
@@ -795,4 +805,32 @@ class ArvadosModel < ActiveRecord::Base
       log.update_to nil
     end
   end
+
+  class << self
+    include ::NewRelic::Agent::MethodTracer
+    add_method_tracer :create, 'Custom/models::arvados_model::#{self.class.name}/create'
+    add_method_tracer :readable_by, 'Custom/models::arvados_model::#{self.class.name}/readable_by'
+    add_method_tracer :deep_sort_hash, 'Custom/models::arvados_model::#{self.class.name}/deep_sort_hash'
+  end
+
+  add_method_tracer :update_attributes, 'Custom/models::arvados_model::#{self.class.name}/update_attributes'
+  add_method_tracer :save_with_unique_name!, 'Custom/models::arvados_model::#{self.class.name}/save_with_unique_name!'
+  add_method_tracer :initialize, 'Custom/models::arvados_model::#{self.class.name}/initialize'
+  add_method_tracer :reload, 'Custom/models::arvados_model::#{self.class.name}/reload'
+  add_method_tracer :log_start_state, 'Custom/models::arvados_model::#{self.class.name}/log_start_state'
+  add_method_tracer :ensure_permission_to_save, 'Custom/models::arvados_model::#{self.class.name}/ensure_permission_to_save'
+  add_method_tracer :ensure_owner_uuid_is_permitted, 'Custom/models::arvados_model::#{self.class.name}/ensure_owner_uuid_is_permitted'
+  add_method_tracer :ensure_ownership_path_leads_to_user, 'Custom/models::arvados_model::#{self.class.name}/ensure_ownership_path_leads_to_user'
+  add_method_tracer :ensure_owner_uuid_is_permitted, 'Custom/models::arvados_model::#{self.class.name}/ensure_owner_uuid_is_permitted'
+  add_method_tracer :ensure_permission_to_destroy, 'Custom/models::arvados_model::#{self.class.name}/ensure_permission_to_destroy'
+  add_method_tracer :update_modified_by_fields, 'Custom/models::arvados_model::#{self.class.name}/update_modified_by_fields'
+  add_method_tracer :maybe_update_modified_by_fields, 'Custom/models::arvados_model::#{self.class.name}/maybe_update_modified_by_fields'
+  add_method_tracer :log_create, 'Custom/models::arvados_model::#{self.class.name}/log_create'
+  add_method_tracer :log_update, 'Custom/models::arvados_model::#{self.class.name}/log_update'
+  add_method_tracer :log_destroy, 'Custom/models::arvados_model::#{self.class.name}/log_destroy'
+  add_method_tracer :convert_serialized_symbols_to_strings, 'Custom/models::arvados_model::#{self.class.name}/convert_serialized_symbols_to_strings'
+  add_method_tracer :normalize_collection_uuids, 'Custom/models::arvados_model::#{self.class.name}/normalize_collection_uuids'
+  add_method_tracer :set_default_owner, 'Custom/models::arvados_model::#{self.class.name}/set_default_owner'
+  add_method_tracer :ensure_valid_uuids, 'Custom/models::arvados_model::#{self.class.name}/ensure_valid_uuids'
+
 end

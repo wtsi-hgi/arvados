@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: AGPL-3.0
 
+require 'new_relic/agent/method_tracer'
+
 module WhitelistUpdate
   def check_update_whitelist permitted_fields
     attribute_names.each do |field|
@@ -12,21 +14,27 @@ module WhitelistUpdate
   end
 
   def really_changed(attr)
-    return false if !send(attr+"_changed?")
-    old = send(attr+"_was")
-    new = send(attr)
-    if (old.nil? || old == [] || old == {}) && (new.nil? || new == [] || new == {})
-      false
-    else
-      old != new
+    chg = nil
+    self.class.trace_execution_scoped(['Custom/whitelist_update/really_changed']) do
+      return false if !send(attr+"_changed?")
+      old = send(attr+"_was")
+      new = send(attr)
+      if (old.nil? || old == [] || old == {}) && (new.nil? || new == [] || new == {})
+        chg = false
+      else
+        chg = old != new
+      end
     end
+    chg
   end
 
   def validate_state_change
-    if self.state_changed?
-      unless state_transitions[self.state_was].andand.include? self.state
-        errors.add :state, "cannot change from #{self.state_was} to #{self.state}"
-        return false
+    self.class.trace_execution_scoped(['Custom/whitelist_update/validate_state_change']) do
+      if self.state_changed?
+        unless state_transitions[self.state_was].andand.include? self.state
+          errors.add :state, "cannot change from #{self.state_was} to #{self.state}"
+          return false
+        end
       end
     end
   end

@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0
 
 require 'safe_json'
+require 'new_relic/agent/method_tracer'
 
 class Serializer
   class TypeMismatch < ArgumentError
@@ -44,6 +45,14 @@ class Serializer
     else
       raise "invalid serialized data #{s[0..5].inspect}"
     end
+  end
+
+  class << self
+    include ::NewRelic::Agent::MethodTracer
+
+    add_method_tracer :dump, 'Custom/Serializer/dump'
+    add_method_tracer :legacy_load, 'Custom/Serializer/legacy_load'
+    add_method_tracer :load, 'Custom/Serializer/load'
   end
 end
 

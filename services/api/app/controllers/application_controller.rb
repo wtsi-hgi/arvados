@@ -23,6 +23,7 @@ end
 require 'load_param'
 
 class ApplicationController < ActionController::Base
+  extend ::NewRelic::Agent::MethodTracer
   include ThemesForRails::ActionController
   include CurrentApiClient
   include LoadParam
@@ -282,27 +283,38 @@ class ApplicationController < ActionController::Base
     limit_columns = model_class.limit_index_columns_read
     limit_columns &= model_class.columns_for_attributes(@select) if @select
     return if limit_columns.empty?
+    limit_query = nil
     model_class.transaction do
-      limit_query = @objects.
-        except(:select, :distinct).
-        select("(%s) as read_length" %
-               limit_columns.map { |s| "octet_length(#{model_class.table_name}.#{s})" }.join(" + "))
+      self.class.trace_execution_scoped(['Custom/application_controller::limit_database_read/limit']) do
+        limit_query = @objects.
+                      except(:select, :distinct).
+                      select("(%s) as read_length" %
+                             limit_columns.map { |s| "octet_length(#{model_class.table_name}.#{s})" }.join(" + "))
+      end
       new_limit = 0
       read_total = 0
-      limit_query.each do |record|
-        new_limit += 1
-        read_total += record.read_length.to_i
-        if read_total >= Rails.configuration.max_index_database_read
-          new_limit -= 1 if new_limit > 1
-          @limit = new_limit
-          break
-        elsif new_limit >= @limit
-          break
+      self.class.trace_execution_scoped(['Custom/application_controller::limit_database_read/each']) do
+        limit_query.each do |record|
+          new_limit += 1
+          read_total += record.read_length.to_i
+          if read_total >= Rails.configuration.max_index_database_read
+            new_limit -= 1 if new_limit > 1
+            @limit = new_limit
+            break
+          elsif new_limit >= @limit
+            break
+          end
         end
       end
-      @objects = @objects.limit(@limit)
+      self.class.trace_execution_scoped(['Custom/application_controller::limit_database_read/objects_limit']) do
+        @objects = @objects.limit(@limit)
+      end
       # Force @objects to run its query inside this transaction.
-      @objects.each { |_| break }
+      foo = nil
+      self.class.trace_execution_scoped(['Custom/application_controller::limit_database_read/objects_each']) do
+        foo = @objects.each { |_| break }
+      end
+      foo
     end
   end
 
@@ -481,27 +493,34 @@ class ApplicationController < ActionController::Base
   accept_param_as_json :reader_tokens, Array
 
   def object_list(model_class:)
-    if @objects.respond_to?(:except)
-      limit_database_read(model_class: model_class)
-    end
-    list = {
-      :kind  => "arvados##{(@response_resource_name || resource_name).camelize(:lower)}List",
-      :etag => "",
-      :self_link => "",
-      :offset => @offset,
-      :limit => @limit,
-      :items => @objects.as_api_response(nil, {select: @select})
-    }
-    case params[:count]
-    when nil, '', 'exact'
-      if @objects.respond_to? :except
-        list[:items_available] = @objects.
-          except(:limit).except(:offset).
-          count(:id, distinct: true)
+    list = nil
+    self.class.trace_execution_scoped(['Custom/application_controller::object_list/limit_database_read']) do
+      if @objects.respond_to?(:except)
+        limit_database_read(model_class: model_class)
       end
-    when 'none'
-    else
-      raise ArgumentError.new("count parameter must be 'exact' or 'none'")
+    end
+    self.class.trace_execution_scoped(['Custom/application_controller::object_list/list']) do
+      list = {
+        :kind  => "arvados##{(@response_resource_name || resource_name).camelize(:lower)}List",
+        :etag => "",
+        :self_link => "",
+        :offset => @offset,
+        :limit => @limit,
+        :items => @objects.as_api_response(nil, {select: @select})
+      }
+    end
+    self.class.trace_execution_scoped(['Custom/application_controller::object_list/count']) do
+      case params[:count]
+      when nil, '', 'exact'
+        if @objects.respond_to? :except
+          list[:items_available] = @objects.
+                                   except(:limit).except(:offset).
+                                   count(:id, distinct: true)
+        end
+      when 'none'
+      else
+        raise ArgumentError.new("count parameter must be 'exact' or 'none'")
+      end
     end
     list
   end
@@ -590,4 +609,33 @@ class ApplicationController < ActionController::Base
     end
     super(*opts)
   end
+
+  add_method_tracer :initialize, 'Custom/application_controller/initialize'
+  add_method_tracer :index, 'Custom/application_controller/index'
+  add_method_tracer :show, 'Custom/application_controller/show'
+  add_method_tracer :create, 'Custom/application_controller/create'
+  add_method_tracer :update, 'Custom/application_controller/update'
+  add_method_tracer :destroy, 'Custom/application_controller/destroy'
+  add_method_tracer :apply_filters, 'Custom/application_controller/apply_filters'
+  add_method_tracer :object_list, 'Custom/application_controller/object_list'
+  add_method_tracer :render_list, 'Custom/application_controller/render_list'
+  add_method_tracer :render, 'Custom/application_controller/render'
+  add_method_tracer :limit_database_read, 'Custom/application_controller/limit_database_read'
+  add_method_tracer :apply_where_limit_order_params, 'Custom/application_controller/apply_where_limit_order_params'
+  add_method_tracer :set_current_request_id, 'Custom/application_controller::filter/set_current_request_id'
+  add_method_tracer :disable_api_methods, 'Custom/application_controller::filter/disable_api_methods'
+  add_method_tracer :set_cors_headers, 'Custom/application_controller::filter/set_cors_headers'
+  add_method_tracer :respond_with_json_by_default, 'Custom/application_controller::filter/respond_with_json_by_default'
+  add_method_tracer :remote_ip, 'Custom/application_controller::filter/remote_ip'
+  add_method_tracer :load_read_auths, 'Custom/application_controller::filter/load_read_auths'
+  add_method_tracer :require_auth_scope, 'Custom/application_controller::filter/require_auth_scope'
+  add_method_tracer :catch_redirect_hint, 'Custom/application_controller::filter/catch_redirect_hint'
+  add_method_tracer :find_object_by_uuid, 'Custom/application_controller::filter/find_object_by_uuid'
+  add_method_tracer :find_objects_for_index, 'Custom/application_controller::filter/find_objects_for_index'
+  add_method_tracer :load_required_parameters, 'Custom/application_controller::filter/load_required_parameters'
+  add_method_tracer :load_limit_offset_order_params, 'Custom/application_controller::filter/load_limit_offset_order_params'
+  add_method_tracer :load_where_param, 'Custom/application_controller::filter/load_where_param'
+  add_method_tracer :load_filters_param, 'Custom/application_controller::filter/load_filters_param'
+  add_method_tracer :reload_object_before_update, 'Custom/application_controller::filter/reload_object_before_update'
+  add_method_tracer :render_404_if_no_object, 'Custom/application_controller::filter/render_404_if_no_object'
 end
