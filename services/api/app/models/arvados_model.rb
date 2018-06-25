@@ -105,7 +105,8 @@ class ArvadosModel < ActiveRecord::Base
   end
 
   def initialize raw_params={}, *args
-    ActiveRecord::Base.connection.execute('SET statement_timeout = 300000')
+    ActiveRecord::Base.connection.execute("SET statement_timeout = #{Rails.configuration.database_statement_timeout}")
+    ActiveRecord::Base.connection.execute("SET lock_timeout = #{Rails.configuration.lock_timeout}")
     super(self.class.permit_attribute_params(raw_params), *args)
   end
 
