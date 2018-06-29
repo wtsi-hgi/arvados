@@ -1,3 +1,7 @@
+// Copyright (C) The Arvados Authors. All rights reserved.
+//
+// SPDX-License-Identifier: AGPL-3.0
+//
 /*******************************************************************************
  * Copyright (c) 2018 Genome Research Ltd.
  *
@@ -18,9 +22,6 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  ******************************************************************************/
-// Copyright (C) The Arvados Authors. All rights reserved.
-//
-// SPDX-License-Identifier: AGPL-3.0
 
 package main
 
@@ -52,10 +53,17 @@ var (
 	radosCluster     string
 	radosUser        string
 	radosReplication int
+	radosIndexWorkers int
 )
 
 var (
 	zeroTime time.Time
+)
+
+var radosindexq *WorkQueue
+
+const (
+	RFC3339NanoMaxLen = 36
 )
 
 type radosVolumeAdder struct {
@@ -119,6 +127,12 @@ func init() {
 		"rados-replication",
 		3,
 		"Replication level reported to clients for subsequent -rados-pool-volume arguments.")
+	flag.IntVar(
+		&radosIndexWorkers,
+		"rados-index-workers",
+		64,
+		"Number of worker goroutines to use for gathering object size/mtime for index")
+
 }
 
 // RadosVolume implements Volume using an Rados pool.
@@ -134,7 +148,8 @@ type RadosVolume struct {
 	ReadOnly       bool
 	StorageClasses []string
 
-	radosPool *radospool
+	ioctx *rados.IOContext
+	stats radospoolStats
 
 	startOnce sync.Once
 }
@@ -231,8 +246,11 @@ func (v *RadosVolume) Start() error {
 
 	ioctx.SetNamespace("keep")
 
-	v.radosPool = &radospool{
-		IOContext: ioctx,
+	v.ioctx = ioctx
+
+	radosindexq = NewWorkQueue()
+	for i := 0; i < 1 || i < radosIndexWorkers; i++ {
+		go RunRadosIndexWorker(radosindexq, v)
 	}
 
 	return nil
@@ -266,39 +284,20 @@ func (v *RadosVolume) Start() error {
 // any of the data.
 //
 // len(buf) will not exceed BlockSize.
-func (v *RadosVolume) Get(ctx context.Context, loc string, buf []byte) (int, error) {
-	rdr, err := v.getReaderWithContext(ctx, loc)
+func (v *RadosVolume) Get(ctx context.Context, loc string, buf []byte) (n int, err error) {
+	if isEmptyBlock(loc) {
+		buf = buf[:0]
+		return 0, nil
+	}
+	n, err = v.radospool.IOContext.Read(loc, buf, 0)
+	err = v.translateError(err)
+	v.stats.Tick(&v.stats.Ops, &v.stats.GetOps)
+	v.stats.TickErr(err)
 	if err != nil {
-		return 0, err
+		return
 	}
-
-	var n int
-	ready := make(chan bool)
-	go func() {
-		defer close(ready)
-
-		defer rdr.Close()
-		n, err = io.ReadFull(rdr, buf)
-
-		switch err {
-		case nil, io.EOF, io.ErrUnexpectedEOF:
-			err = nil
-		default:
-			err = v.translateError(err)
-		}
-	}()
-	select {
-	case <-ctx.Done():
-		theConfig.debugLogf("rados: interrupting ReadFull() with Close() because %s", ctx.Err())
-		rdr.Close()
-		// Must wait for ReadFull to return, to ensure it
-		// doesn't write to buf after we return.
-		theConfig.debugLogf("rados: waiting for ReadFull() to fail")
-		<-ready
-		return 0, ctx.Err()
-	case <-ready:
-		return n, err
-	}
+	v.stats.TickInBytes(n)
+	return
 }
 
 // Compare the given data with the stored data (i.e., what Get
@@ -306,13 +305,23 @@ func (v *RadosVolume) Get(ctx context.Context, loc string, buf []byte) (int, err
 // CollisionError or DiskHashError (depending on whether the
 // data on disk matches the expected hash), or whatever error
 // was encountered opening/reading the stored data.
-func (v *RadosVolume) Compare(ctx context.Context, loc string, expect []byte) error {
-	rdr, err := v.getReaderWithContext(ctx, loc)
+func (v *RadosVolume) Compare(ctx context.Context, loc string, expect []byte) (err error) {
+	buf := make([]byte, len(expect))
+	n, err := v.Get(ctx, loc, buf)
 	if err != nil {
-		return err
+		return
 	}
-	defer rdr.Close()
-	return v.translateError(compareReaderWithBuf(ctx, rdr, expect, loc[:32]))
+	if n != len(expect) {
+		err = fmt.Errorf("rados: Get returned %d bytes but we were expecting %d", n, len(expect))
+		return
+	}
+	expectHash = loc[:32]
+	hash := md5.Sum(buf)
+	if hash != expectHash {
+		err = fmt.Errorf("rados: Get returned object with md5 hash '%s' but we were expecting '%s'", hash, expectHash)
+		return
+	}
+	return
 }
 
 // Put writes a block to an underlying storage device.
@@ -343,23 +352,26 @@ func (v *RadosVolume) Compare(ctx context.Context, loc string, expect []byte) er
 //
 // Put should not verify that loc==hash(block): this is the
 // caller's responsibility.
-func (v *RadosVolume) Put(ctx context.Context, loc string, block []byte) error {
+func (v *RadosVolume) Put(ctx context.Context, loc string, block []byte) (err error) {
 	if v.ReadOnly {
 		return MethodDisabledError
 	}
-
-	err := v.radosPool.IOContext.WriteFull(loc, block)
-	v.radosPool.stats.Tick(&v.radosPool.stats.Ops, &v.radosPool.stats.PutOps)
-	v.radosPool.stats.TickErr(err)
-	if err != nil {
-		return err
+	if !isEmptyBlock(loc) {
+		// no need to actually store empty blocks
+		err = v.ioctx.WriteFull(loc, block)
+		err = v.translateError(err)
+		v.stats.Tick(&v.stats.Ops, &v.stats.PutOps)
+		v.stats.TickErr(err)
+		if err != nil {
+			return
+		}
+		v.stats.TickOutBytes(len(block))
 	}
-	v.radosPool.stats.TickOutBytes(len(block))
 
 	// must also touch the object to set keep_mtime
 	v.radosPool.Touch(loc)
 
-	return v.translateError(err)
+	return
 }
 
 // Touch sets the timestamp for the given locator to the
@@ -386,20 +398,21 @@ func (v *RadosVolume) Put(ctx context.Context, loc string, block []byte) error {
 //
 // Touch must return a non-nil error if the timestamp cannot
 // be updated.
-func (v *RadosVolume) Touch(loc string) error {
+func (v *RadosVolume) Touch(loc string) (err error) {
 	if v.ReadOnly {
 		return MethodDisabledError
 	}
-	_, err := v.radosPool.Head(loc, nil)
+	mtime := time.Now()
+	mtime_string := mtime.Format(time.RFC3339Nano)
+	mtime_bytes := 	[]byte(fmt.Sprintf("%[1]*[2]s", RFC3339NanoMaxLen, mtime_string))
+	err = v.ioctx.SetXattr(oid, "keep_mtime", mtime_bytes)
 	err = v.translateError(err)
-	if os.IsNotExist(err) && v.fixRace(loc) {
-		// The data object got trashed in a race, but fixRace
-		// rescued it.
-	} else if err != nil {
-		return err
+	v.stats.Tick(&v.stats.Ops, &v.stats.SetXattrOps)
+	if err != nil {
+		err = fmt.Errorf("Failed to update mtime xattr for oid '%s': %v", oid, err)
 	}
-	err = v.radosPool.PutReader("recent/"+loc, nil, 0, "application/octet-stream", radosACL, rados.Options{})
-	return v.translateError(err)
+	v.stats.TickErr(err)
+	return
 }
 
 // Mtime returns the stored timestamp for the given locator.
@@ -408,31 +421,29 @@ func (v *RadosVolume) Touch(loc string) error {
 //
 // Mtime must return a non-nil error if the given block is not
 // found or the timestamp could not be retrieved.
-func (v *RadosVolume) Mtime(loc string) (time.Time, error) {
-	_, err := v.radosPool.Head(loc, nil)
-	if err != nil {
-		return zeroTime, v.translateError(err)
-	}
-	resp, err := v.radosPool.Head("recent/"+loc, nil)
+func (v *RadosVolume) Mtime(loc string) (mtime time.Time, err error) {
+	mtime_bytes := make([]byte, RFC3339NanoMaxLen)
+	n, err := ioctx.GetXattr(loc, "keep_mtime", mtime_bytes)
 	err = v.translateError(err)
-	if os.IsNotExist(err) {
-		// The data object X exists, but recent/X is missing.
-		err = v.radosPool.PutReader("recent/"+loc, nil, 0, "application/octet-stream", radosACL, rados.Options{})
-		if err != nil {
-			log.Printf("error: creating %q: %s", "recent/"+loc, err)
-			return zeroTime, v.translateError(err)
-		}
-		log.Printf("info: created %q to migrate existing block to new storage scheme", "recent/"+loc)
-		resp, err = v.radosPool.Head("recent/"+loc, nil)
-		if err != nil {
-			log.Printf("error: created %q but HEAD failed: %s", "recent/"+loc, err)
-			return zeroTime, v.translateError(err)
-		}
-	} else if err != nil {
-		// HEAD recent/X failed for some other reason.
-		return zeroTime, err
+	v.stats.Tick(&v.stats.Ops, &v.stats.GetXattrOps)
+	if err != nil {
+                err = fmt.Errorf("Error getting keep_mtime xattr object %v: %v", loc, err)
+		v.stats.TickErr(err)
+		return
 	}
-	return v.lastModified(resp)
+	if n != RFC3339NanoMaxLen {
+                err = fmt.Errorf("GetXattr read %d bytes for keep_mtime xattr but we were expecting %d", n, RFC3339NanoMaxLen)
+		v.stats.TickErr(err)
+		return
+	}
+	mtime, err = time.Parse(time.RFC3339Nano, string(mtime_bytes[:RFC3339NanoMaxLen]))
+	if err != nil {
+		mtime = zeroTime
+		v.stats.TickErr(err)
+		return
+	}
+	v.stats.TickErr(err)
+	return
 }
 
 // IndexTo writes a complete list of locators with the given
@@ -465,61 +476,27 @@ func (v *RadosVolume) Mtime(loc string) (time.Time, error) {
 //
 // The resulting index is not expected to be sorted in any
 // particular order.
-func (v *RadosVolume) IndexTo(prefix string, writer io.Writer) error {
-	// Use a merge sort to find matching sets of X and recent/X.
-	dataL := radosLister{
-		Pool:   v.radosPool.Pool,
-		Prefix: prefix,
-	}
-	recentL := radosLister{
-		Pool:   v.radosPool.Pool,
-		Prefix: "recent/" + prefix,
-	}
-	v.radosPool.stats.Tick(&v.radosPool.stats.Ops, &v.radosPool.stats.ListOps)
-	v.radosPool.stats.Tick(&v.radosPool.stats.Ops, &v.radosPool.stats.ListOps)
-	for data, recent := dataL.First(), recentL.First(); data != nil; data = dataL.Next() {
-		v.radosPool.stats.Tick(&v.radosPool.stats.Ops, &v.radosPool.stats.ListOps)
-		if data.Key >= "g" {
-			// Conveniently, "recent/*" and "trash/*" are
-			// lexically greater than all hex-encoded data
-			// hashes, so stopping here avoids iterating
-			// over all of them needlessly with dataL.
-			break
-		}
-		if !v.isKeepBlock(data.Key) {
+func (v *RadosVolume) IndexTo(prefix string, writer io.Writer) (err error) {
+	iter, err := v.ioctx.Iter()
+	v.stats.Tick(&v.stats.Ops, &v.stats.ListOps)
+	defer iter.Close()
+
+	outputChan := make(chan[string], radosIndexWorkers)
+	indexList := list.New()
+	for iter.Next() {
+		v.stats.Tick(&v.stats.Ops, &v.stats.ListOps)
+		loc := iter.Value()
+		if !v.isKeepBlock(loc) {
 			continue
 		}
-
-		// stamp is the list entry we should use to report the
-		// last-modified time for this data block: it will be
-		// the recent/X entry if one exists, otherwise the
-		// entry for the data block itself.
-		stamp := data
-
-		// Advance to the corresponding recent/X marker, if any
-		for recent != nil {
-			if cmp := strings.Compare(recent.Key[7:], data.Key); cmp < 0 {
-				recent = recentL.Next()
-				v.radosPool.stats.Tick(&v.radosPool.stats.Ops, &v.radosPool.stats.ListOps)
-				continue
-			} else if cmp == 0 {
-				stamp = recent
-				recent = recentL.Next()
-				v.radosPool.stats.Tick(&v.radosPool.stats.Ops, &v.radosPool.stats.ListOps)
-				break
-			} else {
-				// recent/X marker is missing: we'll
-				// use the timestamp on the data
-				// object.
-				break
-			}
-		}
-		t, err := time.Parse(time.RFC3339, stamp.LastModified)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(writer, "%s+%d %d\n", data.Key, data.Size, t.UnixNano())
+		radosIndexWorkItem := {}
+		indexList.PushBack(&radosIndexWorkItem{
+			Loc: loc,
+			OutputChan: outputChan,
+		})
 	}
+	radosindexq.ReplaceQueue(indexList)
+// TODO MOVE TO WORKER	fmt.Fprintf(writer, "%s+%d %d\n", data.Key, data.Size, t.UnixNano())
 	return nil
 }
 
@@ -787,36 +764,6 @@ func stringInSlice(s string, l []string) bool {
 	return false
 }
 
-// TODO
-func (v *RadosVolume) getReaderWithContext(ctx context.Context, loc string) (rdr io.ReadCloser, err error) {
-	ready := make(chan bool)
-	go func() {
-		rdr, err = v.getReader(loc)
-		close(ready)
-	}()
-	select {
-	case <-ready:
-		return
-	case <-ctx.Done():
-		theConfig.debugLogf("rados: abandoning getReader(): %s", ctx.Err())
-		go func() {
-			<-ready
-			if err == nil {
-				rdr.Close()
-			}
-		}()
-		return nil, ctx.Err()
-	}
-}
-
-// getReader wraps radosPool.GetReader
-func (v *RadosVolume) getReader(loc string) (rdr io.ReadCloser, err error) {
-	rdr, err = v.radosPool.GetReader(loc)
-	if err != nil {
-		err = v.translateError(err)
-	}
-	return
-}
 
 // checkRaceWindow returns a non-nil error if trash/loc is, or might
 // be, in the race window (i.e., it's not safe to trash loc).
@@ -871,87 +818,19 @@ func (v *RadosVolume) safeCopy(dst, src string) error {
 	return nil
 }
 
-// Get the LastModified header from resp, and parse it as RFC1123 or
-// -- if it isn't valid RFC1123 -- as Amazon's variant of RFC1123.
-func (v *RadosVolume) lastModified(resp *http.Response) (t time.Time, err error) {
-	s := resp.Header.Get("Last-Modified")
-	t, err = time.Parse(time.RFC1123, s)
-	if err != nil && s != "" {
-		// AWS example is "Sun, 1 Jan 2006 12:00:00 GMT",
-		// which isn't quite "Sun, 01 Jan 2006 12:00:00 GMT"
-		// as required by HTTP spec. If it's not a valid HTTP
-		// header value, it's probably AWS (or radostest) giving
-		// us a nearly-RFC1123 timestamp.
-		t, err = time.Parse(nearlyRFC1123, s)
-	}
-	return
-}
-
 // InternalStats returns pool I/O and API call counters.
 func (v *RadosVolume) InternalStats() interface{} {
-	return &v.radosPool.stats
+	return &v.stats
 }
-
-// String implements fmt.Stringer.
-
-// Writable returns false if all future Put, Mtime, and Delete calls
-// are expected to fail.
-
-// Replication returns the storage redundancy of the underlying
-// device. Configured via command line flag.
-
-// GetStorageClasses implements Volume
 
 var radosKeepBlockRegexp = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
-func (v *RadosVolume) isKeepBlock(s string) bool {
-	return radosKeepBlockRegexp.MatchString(s)
+func (v *RadosVolume) isEmptyBlock(loc string) bool {
+	return loc[:32] == EmptyHash
 }
 
-// fixRace(X) is called when "recent/X" exists but "X" doesn't
-// exist. If the timestamps on "recent/"+loc and "trash/"+loc indicate
-// there was a race between Put and Trash, fixRace recovers from the
-// race by Untrashing the block.
-func (v *RadosVolume) fixRace(loc string) bool {
-	trash, err := v.radosPool.Head("trash/"+loc, nil)
-	if err != nil {
-		if !os.IsNotExist(v.translateError(err)) {
-			log.Printf("error: fixRace: HEAD %q: %s", "trash/"+loc, err)
-		}
-		return false
-	}
-	trashTime, err := v.lastModified(trash)
-	if err != nil {
-		log.Printf("error: fixRace: parse %q: %s", trash.Header.Get("Last-Modified"), err)
-		return false
-	}
-
-	recent, err := v.radosPool.Head("recent/"+loc, nil)
-	if err != nil {
-		log.Printf("error: fixRace: HEAD %q: %s", "recent/"+loc, err)
-		return false
-	}
-	recentTime, err := v.lastModified(recent)
-	if err != nil {
-		log.Printf("error: fixRace: parse %q: %s", recent.Header.Get("Last-Modified"), err)
-		return false
-	}
-
-	ageWhenTrashed := trashTime.Sub(recentTime)
-	if ageWhenTrashed >= theConfig.BlobSignatureTTL.Duration() {
-		// No evidence of a race: block hasn't been written
-		// since it became eligible for Trash. No fix needed.
-		return false
-	}
-
-	log.Printf("notice: fixRace: %q: trashed at %s but touched at %s (age when trashed = %s < %s)", loc, trashTime, recentTime, ageWhenTrashed, theConfig.BlobSignatureTTL)
-	log.Printf("notice: fixRace: copying %q to %q to recover from race between Put/Touch and Trash", "recent/"+loc, loc)
-	err = v.safeCopy(loc, "trash/"+loc)
-	if err != nil {
-		log.Printf("error: fixRace: %s", err)
-		return false
-	}
-	return true
+func (v *RadosVolume) isKeepBlock(s string) bool {
+	return radosKeepBlockRegexp.MatchString(s)
 }
 
 func (v *RadosVolume) translateError(err error) error {
@@ -1026,83 +905,14 @@ func (lister *radosLister) pop() (k *rados.Key) {
 	return
 }
 
-type radospoolreaderat struct {
-	*radospool
-	oid string
-}
-
-func (r *radospoolreaderat) ReadAt(p []byte, off int64) (n int, err error) {
-	return r.radospool.IOContext.Read(r.oid, p, off)
-}
-
-// radospool wraps rados.pool and counts I/O and API usage stats.
-type radospool struct {
-	*rados.IOContext
-	stats radospoolStats
-}
-
-func (p *radospool) Touch(oid string) error {
-	mtime := time.Now().UnixNano()
-	mtime_bytes := make([]byte, binary.MaxVarintLen64)
-	binary.PutVarint(mtime_bytes, mtime)
-	err = p.IOContext.SetXattr(oid, "keep_mtime", mtime_bytes)
-	p.stats.Tick(&p.stats.Ops, &p.stats.XattrOps)
-	p.stats.TickErr(err)
-	if err != nil {
-		err = fmt.Errorf("Failed to update mtime xattr for oid '%s': %v", oid, err)
-	}
-	return err
-}
-
-func (p *radospool) GetReader(oid string) (io.ReadCloser, error) {
-	rdrat := &radospoolreaderat{
-		radospool: p,
-		oid:       oid,
-	}
-	rdr := io.NewSectionReader(rdrat, 0, BlockSize)
-	p.stats.Tick(&p.stats.Ops, &p.stats.GetOps)
-	return NewCountingReader(rdr, p.stats.TickInBytes), nil
-}
-
-func (p *radospool) Head(oid string, headers map[string][]string) (*rados.ObjectStat, error) {
-	stat, err := p.IOContext.Stat(oid, headers)
-	p.stats.Tick(&p.stats.Ops, &p.stats.StatOps)
-	p.stats.TickErr(err)
-	return stat, err
-}
-
-func (p *radospool) PutReader(oid string, r io.Reader, length int64) error {
-	if length == 0 {
-		// Ceph (or at least go-ceph) cannot store 0-length
-		// objects, so we treat them as a special case.
-		r = nil
-	} else {
-		r = NewCountingReader(r, p.stats.TickOutBytes)
-	}
-
-	buf := make([]byte, length)
-	_, err := io.ReadFull(r, buf)
-	if err != nil {
-		return err
-	}
-
-	return err
-}
-
-func (p *radospool) Del(path string) error {
-	err := p.IOContext.Del(path)
-	p.stats.Tick(&p.stats.Ops, &p.stats.DelOps)
-	p.stats.TickErr(err)
-	return err
-}
-
 type radospoolStats struct {
 	statsTicker
 	Ops      uint64
 	GetOps   uint64
 	PutOps   uint64
 	StatOps  uint64
-	XattrOps uint64
+	GetXattrOps uint64
+	SetXattrOps uint64
 	DelOps   uint64
 	ListOps  uint64
 }
@@ -1116,4 +926,26 @@ func (s *radospoolStats) TickErr(err error) {
 		errType = errType + fmt.Sprintf(" %d %s", err.StatusCode, err.Code)
 	}
 	s.statsTicker.TickErr(err, errType)
+}
+
+type radosIndexWorkItem struct {
+	Loc string
+	OutputChan chan[string]
+}
+
+// RunRadosIndexWorker receives PullRequests from pullq, invokes
+// PullItemAndProcess on each one. After each PR, it logs a message
+// indicating whether the pull was successful.
+func RunRadosIndexWorker(radosindexq *WorkQueue, v *RadosVolume) {
+	for item := range radosindexq.NextItem {
+		// TODO
+		pr := item.(PullRequest)
+		err := PullItemAndProcess(pr, keepClient)
+		pullq.DoneItem <- struct{}{}
+		if err == nil {
+			log.Printf("Pull %s success", pr)
+		} else {
+			log.Printf("Pull %s error: %s", pr, err)
+		}
+	}
 }
