@@ -44,6 +44,7 @@ import (
 
 	"git.curoverse.com/arvados.git/sdk/go/arvados"
 	"github.com/ceph/go-ceph/rados"
+	"github.com/satori/go.uuid"
 )
 
 var (
@@ -60,10 +61,15 @@ var (
 	zeroTime time.Time
 )
 
-var radosindexq *WorkQueue
-
 const (
 	RFC3339NanoMaxLen = 36
+	RadosLockBusy = -16
+	RadosLockExist = -17
+	RadosLockLocked = 0
+	RadosLockUnlocked = 0
+	RadosLockData = "keep_lock_data"
+	RadosLockMtime = "keep_lock_mtime"
+	RadosLockTrash = "keep_lock_trash"
 )
 
 type radosVolumeAdder struct {
@@ -77,7 +83,7 @@ func (s *radosVolumeAdder) String() string {
 
 func (s *radosVolumeAdder) Set(poolName string) error {
 	if poolName == "" {
-		return fmt.Errorf("no rados pool name given")
+		return fmt.Errorf("rados: no pool name given")
 	}
 	if radosKeyRingFile == "" {
 		return fmt.Errorf("-rados-keyring-file argument must given before -rados-pool-volume")
@@ -145,6 +151,9 @@ type RadosVolume struct {
 	Debug            bool
 	RadosReplication int
 
+	ReadTimeout        arvados.Duration
+	WriteTimeout       arvados.Duration
+	MetadataTimeout       arvados.Duration
 	ReadOnly       bool
 	StorageClasses []string
 
@@ -248,11 +257,6 @@ func (v *RadosVolume) Start() error {
 
 	v.ioctx = ioctx
 
-	radosindexq = NewWorkQueue()
-	for i := 0; i < 1 || i < radosIndexWorkers; i++ {
-		go RunRadosIndexWorker(radosindexq, v)
-	}
-
 	return nil
 }
 
@@ -289,7 +293,21 @@ func (v *RadosVolume) Get(ctx context.Context, loc string, buf []byte) (n int, e
 		buf = buf[:0]
 		return 0, nil
 	}
-	n, err = v.radospool.IOContext.Read(loc, buf, 0)
+
+	// Obtain a shared read lock so that Get does not happen at the same time as Put
+	cookie, err = v.LockShared(ctx, loc, RadosLockData, "Get", v.ReadTimeout)
+	if err != nil {
+		return
+	}
+	defer func() {
+		lockErr := v.Unlock(loc, RadosLockData, cookie)
+		if err == nil && lockErr != nil {
+			err = lockErr
+		}
+		return
+	}()
+
+	n, err = v.ioctx.Read(loc, buf, 0)
 	err = v.translateError(err)
 	v.stats.Tick(&v.stats.Ops, &v.stats.GetOps)
 	v.stats.TickErr(err)
@@ -355,9 +373,22 @@ func (v *RadosVolume) Compare(ctx context.Context, loc string, expect []byte) (e
 func (v *RadosVolume) Put(ctx context.Context, loc string, block []byte) (err error) {
 	if v.ReadOnly {
 		return MethodDisabledError
+	}	
+
+	cookie, err = v.LockExclusive(ctx, loc, RadosLockData, "Put", v.ReadTimeout)
+	if err != nil {
+		return
 	}
+	defer func() {
+		lockErr := v.Unlock(loc, RadosLockData, cookie)
+		if err == nil && lockErr != nil {
+			err = lockErr
+		}
+		return
+	}()
+
+	// only store non-empty blocks
 	if !isEmptyBlock(loc) {
-		// no need to actually store empty blocks
 		err = v.ioctx.WriteFull(loc, block)
 		err = v.translateError(err)
 		v.stats.Tick(&v.stats.Ops, &v.stats.PutOps)
@@ -366,10 +397,16 @@ func (v *RadosVolume) Put(ctx context.Context, loc string, block []byte) (err er
 			return
 		}
 		v.stats.TickOutBytes(len(block))
+		if lockErr != nil {
+			err = lockErr
+			return
+		}
 	}
 
-	// must also touch the object to set keep_mtime
-	v.radosPool.Touch(loc)
+	// Touch object to set Mtime on the object to the current time
+	// note that this will create an empty object as a side effect
+	// if it does not already exist.
+	err = v.Touch(loc)
 
 	return
 }
@@ -402,16 +439,30 @@ func (v *RadosVolume) Touch(loc string) (err error) {
 	if v.ReadOnly {
 		return MethodDisabledError
 	}
-	mtime := time.Now()
-	mtime_string := mtime.Format(time.RFC3339Nano)
-	mtime_bytes := 	[]byte(fmt.Sprintf("%[1]*[2]s", RFC3339NanoMaxLen, mtime_string))
-	err = v.ioctx.SetXattr(oid, "keep_mtime", mtime_bytes)
-	err = v.translateError(err)
-	v.stats.Tick(&v.stats.Ops, &v.stats.SetXattrOps)
+	cookie, err = v.LockExclusive(ctx, loc, RadosLockMtime, "Touch", v.ReadTimeout)
 	if err != nil {
-		err = fmt.Errorf("Failed to update mtime xattr for oid '%s': %v", oid, err)
+		return
 	}
-	v.stats.TickErr(err)
+	defer func() {
+		lockErr := v.Unlock(loc, RadosLockMtime, cookie)
+		if err == nil && lockErr != nil {
+			err = lockErr
+		}
+		return
+	}()
+
+	err = v.TouchNoLock(loc)
+	return
+}
+
+// TouchNoLock performs the functions of Touch without obtaining
+// a lock on mtime, so that it can be called by methods that
+// already hold such a lock.
+//
+// Not part of the *Volume interface
+func (v *RadosVolume) ToucnNoLock(loc string) (err error) {
+	mtime := time.Now()
+	err = v.SetMtime(mtime)
 	return
 }
 
@@ -422,17 +473,39 @@ func (v *RadosVolume) Touch(loc string) (err error) {
 // Mtime must return a non-nil error if the given block is not
 // found or the timestamp could not be retrieved.
 func (v *RadosVolume) Mtime(loc string) (mtime time.Time, err error) {
+	cookie, err = v.LockShared(ctx, loc, RadosLockMtime, "Mtime", v.ReadTimeout)
+	if err != nil {
+		return
+	}
+	defer func() {
+		lockErr := v.Unlock(loc, RadosLockMtime, cookie)
+		if err == nil && lockErr != nil {
+			err = lockErr
+		}
+		return
+	}()
+
+	mtime, err = v.MtimeNoLock(loc)
+	return
+}
+
+// MtimeNoLock performs the functions of Mtime without obtaining
+// a lock on mtime, so that it can be called by methods that
+// already hold such a lock.
+//
+// Not part of the *Volume interface
+func (v *RadosVolume) MtimeNoLock(loc string) (mtime time.Time, err error) {
 	mtime_bytes := make([]byte, RFC3339NanoMaxLen)
 	n, err := ioctx.GetXattr(loc, "keep_mtime", mtime_bytes)
 	err = v.translateError(err)
 	v.stats.Tick(&v.stats.Ops, &v.stats.GetXattrOps)
 	if err != nil {
-                err = fmt.Errorf("Error getting keep_mtime xattr object %v: %v", loc, err)
+                err = fmt.Errorf("rados: failed to get keep_mtime xattr object %v: %v", loc, err)
 		v.stats.TickErr(err)
 		return
 	}
 	if n != RFC3339NanoMaxLen {
-                err = fmt.Errorf("GetXattr read %d bytes for keep_mtime xattr but we were expecting %d", n, RFC3339NanoMaxLen)
+                err = fmt.Errorf("rados: GetXattr read %d bytes for keep_mtime xattr but we were expecting %d", n, RFC3339NanoMaxLen)
 		v.stats.TickErr(err)
 		return
 	}
@@ -445,6 +518,7 @@ func (v *RadosVolume) Mtime(loc string) (mtime time.Time, err error) {
 	v.stats.TickErr(err)
 	return
 }
+
 
 // IndexTo writes a complete list of locators with the given
 // prefix for which Get() can retrieve data.
@@ -477,27 +551,7 @@ func (v *RadosVolume) Mtime(loc string) (mtime time.Time, err error) {
 // The resulting index is not expected to be sorted in any
 // particular order.
 func (v *RadosVolume) IndexTo(prefix string, writer io.Writer) (err error) {
-	iter, err := v.ioctx.Iter()
-	v.stats.Tick(&v.stats.Ops, &v.stats.ListOps)
-	defer iter.Close()
-
-	outputChan := make(chan[string], radosIndexWorkers)
-	indexList := list.New()
-	for iter.Next() {
-		v.stats.Tick(&v.stats.Ops, &v.stats.ListOps)
-		loc := iter.Value()
-		if !v.isKeepBlock(loc) {
-			continue
-		}
-		radosIndexWorkItem := {}
-		indexList.PushBack(&radosIndexWorkItem{
-			Loc: loc,
-			OutputChan: outputChan,
-		})
-	}
-	radosindexq.ReplaceQueue(indexList)
-// TODO MOVE TO WORKER	fmt.Fprintf(writer, "%s+%d %d\n", data.Key, data.Size, t.UnixNano())
-	return nil
+	err = v.listObjects(prefix, writer)
 }
 
 // Trash moves the block data from the underlying storage
@@ -530,40 +584,81 @@ func (v *RadosVolume) IndexTo(prefix string, writer io.Writer) (err error) {
 // Corollary: A successful Touch or Put guarantees a block
 // will not be trashed for at least BlobSignatureTTL
 // seconds.
-func (v *RadosVolume) Trash(loc string) error {
+func (v *RadosVolume) Trash(loc string) (err error) {
 	if v.ReadOnly {
 		return MethodDisabledError
 	}
-	if t, err := v.Mtime(loc); err != nil {
-		return err
+
+	// Must take the data lock before the mtime lock to ensure that
+	// we cannot get into a deadlock with Put, which takes the two
+	// locks in the same order. We obtain a trash lock as well to
+	// prevent races between multiple Trash invocations or between
+	// Trash and Untrash
+	dataCookie, err = v.LockExclusive(ctx, loc, RadosLockData, "Trash", v.ReadTimeout)
+	if err != nil {
+		return
+	}
+	mtimeCookie, err = v.LockExclusive(ctx, loc, RadosLockMtime, "Trash", v.ReadTimeout)
+	if err != nil {
+		return
+	}
+	trashCookie, err = v.LockExclusive(ctx, loc, RadosLockTrash, "Trash", v.ReadTimeout)
+	if err != nil {
+		return
+	}
+	defer func() {
+		dataLockErr := v.Unlock(loc, RadosLockData, dataCookie)
+		if err == nil && dataLockErr != nil {
+			err = dataLockErr
+		}
+		mtimeLockErr := v.Unlock(loc, RadosLockMtime, mtimeCookie)
+		if err == nil && mtimeLockErr != nil {
+			err = mtimeLockErr
+		}
+		trashLockErr := v.Unlock(loc, RadosLockTrash, trashCookie)
+		if err == nil && trashLockErr != nil {
+			err = trashLockErr
+		}
+		return
+	}()
+
+	// check if this object is already trash
+	isTrash, err := v.IsTrash(loc)
+	// foo
+
+	// check mtime and mark as trash if needed, all while holding data and mtime locks
+	// call v.MtimeNoLock instead of v.Mtime as we already have an exclusive lock on mtime
+	// which would conflict with the shared lock that v.Mtime obtains
+	if t, err := v.MtimeNoLock(loc); err != nil {
+		return
 	} else if time.Since(t) < theConfig.BlobSignatureTTL.Duration() {
-		return nil
+		err = nil
+		return
 	}
 	if theConfig.TrashLifetime == 0 {
-		if !radosUnsafeDelete {
-			return ErrRadosTrashDisabled
-		}
-		return v.translateError(v.radosPool.Del(loc))
+		err = v.DeleteNoLock(loc)
+		return
 	}
-	err := v.checkRaceWindow(loc)
+	
+	// mark as trash using MarkTrashNoLock as we already have obtained the trash lock
+	err = v.MarkTrashNoLock(loc)
 	if err != nil {
-		return err
+		return
 	}
-	err = v.safeCopy("trash/"+loc, loc)
-	if err != nil {
-		return err
-	}
-	return v.translateError(v.radosPool.Del(loc))
+
+	// update mtime so that the time it was trashed is recorded
+	// call v.TouchNoLock instead of v.Touch as we already hold an
+	// exclusive lock on mtime
+	err = v.TouchNoLock(loc)
+
+	return
 }
 
 // Untrash moves block from trash back into store
 func (v *RadosVolume) Untrash(loc string) error {
-	err := v.safeCopy(loc, "trash/"+loc)
-	if err != nil {
-		return err
-	}
-	err = v.radosPool.PutReader("recent/"+loc, nil, 0, "application/octet-stream", radosACL, rados.Options{})
-	return v.translateError(err)
+	// mark as not trash (MarkNotTrash handles locking itself)
+	err = v.MarkNotTrash(loc)
+	return
 }
 
 // Status returns a *VolumeStatus representing the current
@@ -742,6 +837,9 @@ func (*RadosVolume) Examples() []Volume {
 			Cluster:          "ceph",
 			User:             "client.keep01",
 			RadosReplication: 3,
+			ReadTimeout:    arvados.Duration(5 * time.Minute),
+			WriteTimeout:    arvados.Duration(5 * time.Minute),
+			MetadataTimeout:    arvados.Duration(10 * time.Second),
 		},
 		&RadosVolume{
 			Pool:             "keep02",
@@ -750,8 +848,305 @@ func (*RadosVolume) Examples() []Volume {
 			Cluster:          "ceph",
 			User:             "client.keep02",
 			RadosReplication: 3,
+			ReadTimeout:    arvados.Duration(5 * time.Minute),
+			WriteTimeout:    arvados.Duration(5 * time.Minute),
+			MetadataTimeout:    arvados.Duration(10 * time.Second),
 		},
 	}
+}
+
+
+// Size returns the size in bytes for the given locator.
+//
+// loc is as described in Get.
+//
+// Size must return a non-nil error if the given block is not
+// found or the size could not be retrieved.
+//
+// Not part of the *Volume interface
+func (v *RadosVolume) Size(loc string) (size int64, err error) {
+	stat, err := v.ioctx.Stat(loc)
+	err = v.translateError(err)
+	v.stats.Tick(&v.stats.Ops, &v.stats.StatOps)
+	v.stats.TickErr(err)
+	if err != nil {
+		return
+	}
+	size = stat.Size
+	return
+}
+
+// Obtains an exclusive lock on the object for writing, waiting
+// if necessary. 
+//
+// Returns the lock cookie which must be passed to Unlock()
+// to release the lock.
+//
+// Not part of the *Volume interface
+func (v *RadosVolume) LockExclusive(ctx context.Context, loc string, name string, desc string, timeout time.Duration) (cookie string, err error) {
+	lock_acquired := make(chan bool)
+	cookie, err = uuid.NewV4()
+	if err != nil {
+		return
+	}
+	// attempt to obtain lock repeatedly, unless ctx.Done() occurs, in which case abandon attempt to lock
+	go func() {
+		locked := false
+		for !locked {
+			select {
+			case <-ctx.Done():
+				close(lock_acquired)
+				return
+			default:
+				res, err = v.ioctx.LockExclusive(loc, name, cookie, desc, timeout, nil)
+				if err != nil {
+					return
+				}
+				switch res {
+				case RadosLockBusy:
+					theConfig.debugLogf("rados: attempting to get exclusive %s lock for %s on object %s: lock busy", name, desc, oid)
+					time.Sleep(100 * time.Millisecond)
+				case RadosLockExist:
+					theConfig.debugLogf("rados: attempting to get exclusive %s lock for %s on object %s: lock exists", name, desc, oid)
+					time.Sleep(100 * time.Millisecond)
+				case RadosLockLocked:
+					locked = true
+				default:
+					err = fmt.Errorf("rados: attempting to get exclusive %s lock for %s on object %s: unexpected non-error return value %d from LockExclusive", name, desc, oid, res)
+					return
+				}
+			}
+		}
+		close(lock_acquired)
+	}()
+	select {
+	case <-lock_acquired:
+		return
+	case <-ctx.Done():
+		theConfig.debugLogf("rados: abandoning attempt to obtain exclusive %s lock for %s on object %s: %s", name, desc, oid, ctx.Err())
+		go func() {
+			<-ready
+			if err == nil {
+				rdr.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
+	
+	return
+}
+
+// Obtains a shared lock on the object, waiting if necessary.
+//
+// Used to prevent read operations such as Get and Compare from
+// occurring during a Put.
+//
+// Returns the lock cookie which must be passed to Unlock()
+// to release the lock.
+//
+// Not part of the *Volume interface
+func (v *RadosVolume) LockShared(ctx context.Context, loc string, name string, desc string, timeout time.Duration) (cookie string, err error) {
+	lock_acquired := make(chan bool)
+	cookie, err = uuid.NewV4()
+	if err != nil {
+		return
+	}
+	// attempt to obtain lock repeatedly, unless ctx.Done() occurs, in which case abandon attempt to lock
+	go func() {
+		locked := false
+		for !locked {
+			select {
+			case <-ctx.Done():
+				close(lock_acquired)
+				return
+			default:
+				res, err = v.ioctx.LockShared(loc, name, cookie, "", desc, timeout, nil)
+				if err != nil {
+					return
+				}
+				switch res {
+				case RadosLockBusy:
+					theConfig.debugLogf("rados: attempting to get shared %s lock for %s on object %s: lock busy", name, desc, oid)
+					time.Sleep(100 * time.Millisecond)
+				case RadosLockExist:
+					theConfig.debugLogf("rados: attempting to get shared %s lock for %s on object %s: lock exists", name, desc, oid)
+					time.Sleep(100 * time.Millisecond)
+				case RadosLockLocked:
+					locked = true
+				default:
+					err = fmt.Errorf("rados: attempting to get shared %s lock for %s on object %s: unexpected non-error return value %d from LockShared", name, desc, oid, res)
+					return
+				}
+			}
+		}
+		close(lock_acquired)
+	}()
+	select {
+	case <-lock_acquired:
+		return
+	case <-ctx.Done():
+		theConfig.debugLogf("rados: abandoning attempt to obtain shared %s lock for %s on object %s: %s", name, desc, oid, ctx.Err())
+		go func() {
+			<-ready
+			if err == nil {
+				rdr.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
+	
+	return
+}
+
+// Unlock previously obtained data lock
+//
+// Not part of the *Volume interface
+func (v *RadosVolume) Unlock(loc string, name string, cookie string) (err error) {
+	res, err = v.ioctx.Unlock(loc, name, cookie)
+	if err != nil {
+		return
+	}
+	if res == rados.RadosErrorNotFound {
+		err = fmt.Errorf("rados: attempting to unlock %s lock for %s on object %s, lock was not held for cookie '%s'", name, desc, loc, cookie)
+	}
+	return
+}
+
+// DeleteNoLock deletes the block now, regardless of trash state
+//
+// Not part of the *Volume interface
+func (v *RadosVolume) DeleteNoLock(loc string) (err error) {
+	err = v.ioctx.Delete(loc)
+	err = v.translateError(err)
+	v.stats.Tick(&v.stats.Ops, &v.stats.DelOps)
+	v.stats.TickErr(err)
+	return
+}
+
+// IsTrash returns true is the object is marked as trash
+// otherwise it returns false
+//
+// Not part of the *Volume interface
+func (v *RadosVolume) IsTrash(oid string) (trash bool, err error) {
+	cookie, err = v.LockShared(ctx, loc, RadosLockTrash, "IsTrash", v.ReadTimeout)
+	if err != nil {
+		return
+	}
+	defer func() {
+		lockErr := v.Unlock(loc, RadosLockTrash, cookie)
+		if err == nil && lockErr != nil {
+			err = lockErr
+		}
+		return
+	}()
+	trash_bytes := make([]byte, 1)
+	n, err := ioctx.GetXattr(oid, "keep_trash", trash_bytes)
+	err = v.translateError(err)
+	v.stats.Tick(&v.stats.Ops, &v.stats.GetXattrOps)
+	v.stats.TickErr(err)
+	if err != nil {
+                err = fmt.Errorf("rados: failed to get keep_trash xattr object %v: %v", loc, err)
+		return
+	}
+	if n != 1 {
+                err = fmt.Errorf("rados: GetXattr read %d bytes for keep_trash xattr but we were expecting %d", n, RFC3339NanoMaxLen)
+		return
+	}
+	switch trash_bytes[0] {
+	case 0:
+		trash = false
+	case 1:
+		trash = true
+	default:
+		err = fmt.Errorf("rados: got unexpected keep_trash xattr value %d when we were expecting either 0 or 1", trash_bytes[0])
+	}
+	return
+}
+
+// MarkTrash marks an object as trash.
+//
+// Not part of the *Volume interface
+func (v *RadosVolume) MarkTrash(oid string) (err error) {
+	cookie, err = v.LockExclusive(ctx, loc, RadosLockTrash, "MarkTrash", v.ReadTimeout)
+	if err != nil {
+		return
+	}
+	defer func() {
+		lockErr := v.Unlock(loc, RadosLockTrash, cookie)
+		if err == nil && lockErr != nil {
+			err = lockErr
+		}
+		return
+	}()
+	err = v.MarkTrashNoLock(oid)
+	return
+}
+
+// MarkTrashNoLock does the same as MarkTrash but without
+// first obtaining a lock on trash, as the caller is expected
+// to already hold one.
+//
+// Not part of the *Volume interface
+func (v *RadosVolume) MarkTrashNoLock(oid string) (err error) {
+	err = v.ioctx.SetXattr(oid, "keep_trash", []byte(1))
+	err = v.translateError(err)
+	v.stats.Tick(&v.stats.Ops, &v.stats.SetXattrOps)
+	v.stats.TickErr(err)
+	if err != nil {
+		err = fmt.Errorf("rados: MarkTrashNoLock failed to update keep_trash xattr for oid '%s': %v", oid, err)
+	}
+	return
+}
+
+// MarkNotTrash ensures that the object is not marked as trash
+//
+// Not part of the *Volume interface
+func (v *RadosVolume) MarkNotTrash(oid string) (err error) {
+	cookie, err = v.LockExclusive(ctx, loc, RadosLockTrash, "MarkNotTrash", v.ReadTimeout)
+	if err != nil {
+		return
+	}
+	defer func() {
+		lockErr := v.Unlock(loc, RadosLockTrash, cookie)
+		if err == nil && lockErr != nil {
+			err = lockErr
+		}
+		return
+	}()
+	err = v.MarkNotTrashNoLock(oid)
+	return
+}
+
+// MarkNotTrashNoLock does the same thing as MarkNotTrash, but
+// without obtaining a lock on trash, as the caller is expected
+// to already hold one. 
+//
+// Not part of the *Volume interface
+func (v *RadosVolume) MarkNotTrashNoLock(oid string) (err error) {
+	err = v.ioctx.SetXattr(oid, "keep_trash", []byte(0))
+	err = v.translateError(err)
+	v.stats.Tick(&v.stats.Ops, &v.stats.SetXattrOps)
+	v.stats.TickErr(err)
+	if err != nil {
+		err = fmt.Errorf("rados: MarkNotTrashNoLock failed to update keep_trash xattr for oid '%s': %v", oid, err)
+	}
+	return
+}
+
+// SetMtime sets the keep_mtime xattr to the given time
+//
+// Not part of the *Volume interface
+func (v  *RadosVolume) SetMtime(mtime time.Time) (err error) {
+	mtime_string := mtime.Format(time.RFC3339Nano)
+	mtime_bytes := 	[]byte(fmt.Sprintf("%[1]*[2]s", RFC3339NanoMaxLen, mtime_string))
+	err = v.ioctx.SetXattr(oid, "keep_mtime", mtime_bytes)
+	err = v.translateError(err)
+	v.stats.Tick(&v.stats.Ops, &v.stats.SetXattrOps)
+	if err != nil {
+		err = fmt.Errorf("rados: failed to update keep_mtime xattr for oid '%s': %v", oid, err)
+	}
+	v.stats.TickErr(err)
+	return
 }
 
 // Return true if string s is an element of slice l
@@ -762,60 +1157,6 @@ func stringInSlice(s string, l []string) bool {
 		}
 	}
 	return false
-}
-
-
-// checkRaceWindow returns a non-nil error if trash/loc is, or might
-// be, in the race window (i.e., it's not safe to trash loc).
-func (v *RadosVolume) checkRaceWindow(loc string) error {
-	resp, err := v.radosPool.Head("trash/"+loc, nil)
-	err = v.translateError(err)
-	if os.IsNotExist(err) {
-		// OK, trash/X doesn't exist so we're not in the race
-		// window
-		return nil
-	} else if err != nil {
-		// Error looking up trash/X. We don't know whether
-		// we're in the race window
-		return err
-	}
-	t, err := v.lastModified(resp)
-	if err != nil {
-		// Can't parse timestamp
-		return err
-	}
-	safeWindow := t.Add(theConfig.TrashLifetime.Duration()).Sub(time.Now().Add(time.Duration(v.RaceWindow)))
-	if safeWindow <= 0 {
-		// We can't count on "touch trash/X" to prolong
-		// trash/X's lifetime. The new timestamp might not
-		// become visible until now+raceWindow, and EmptyTrash
-		// is allowed to delete trash/X before then.
-		return fmt.Errorf("same block is already in trash, and safe window ended %s ago", -safeWindow)
-	}
-	// trash/X exists, but it won't be eligible for deletion until
-	// after now+raceWindow, so it's safe to overwrite it.
-	return nil
-}
-
-// safeCopy calls PutCopy, and checks the response to make sure the
-// copy succeeded and updated the timestamp on the destination object
-// (PutCopy returns 200 OK if the request was received, even if the
-// copy failed).
-func (v *RadosVolume) safeCopy(dst, src string) error {
-	resp, err := v.radosPool.PutCopy(dst, radosACL, rados.CopyOptions{
-		ContentType:       "application/octet-stream",
-		MetadataDirective: "REPLACE",
-	}, v.radosPool.Name+"/"+src)
-	err = v.translateError(err)
-	if err != nil {
-		return err
-	}
-	if t, err := time.Parse(time.RFC3339Nano, resp.LastModified); err != nil {
-		return fmt.Errorf("PutCopy succeeded but did not return a timestamp: %q: %s", resp.LastModified, err)
-	} else if time.Now().Sub(t) > maxClockSkew {
-		return fmt.Errorf("PutCopy succeeded but returned an old timestamp: %q: %s", resp.LastModified, t)
-	}
-	return nil
 }
 
 // InternalStats returns pool I/O and API call counters.
@@ -843,64 +1184,72 @@ func (v *RadosVolume) translateError(err error) error {
 	return err
 }
 
-// EmptyTrash looks for trashed blocks that exceeded TrashLifetime
-// and deletes them from the volume.
-
-type radosLister struct {
-	Pool       *rados.Pool
-	Prefix     string
-	PageSize   int
-	nextMarker string
-	buf        []rados.Key
-	err        error
+type listEntry struct {
+	oid string
+	size int64
+	mtime time.Time
+	err error
 }
 
-// First fetches the first page and returns the first item. It returns
-// nil if the response is the empty set or an error occurs.
-func (lister *radosLister) First() *rados.Key {
-	lister.getPage()
-	return lister.pop()
-}
-
-// Next returns the next item, fetching the next page if necessary. It
-// returns nil if the last available item has already been fetched, or
-// an error occurs.
-func (lister *radosLister) Next() *rados.Key {
-	if len(lister.buf) == 0 && lister.nextMarker != "" {
-		lister.getPage()
-	}
-	return lister.pop()
-}
-
-// Return the most recent error encountered by First or Next.
-func (lister *radosLister) Error() error {
-	return lister.err
-}
-
-func (lister *radosLister) getPage() {
-	resp, err := lister.Pool.List(lister.Prefix, "", lister.nextMarker, lister.PageSize)
-	lister.nextMarker = ""
+func (v *RadosVolume) listObjects(prefix string, writer io.Writer) (err error) {
+	// open object list iterator
+	iter, err := v.ioctx.Iter()
+	v.stats.Tick(&v.stats.Ops, &v.stats.ListOps)
+	v.stats.TickErr(err)
 	if err != nil {
-		lister.err = err
 		return
 	}
-	if resp.IsTruncated {
-		lister.nextMarker = resp.NextMarker
+	defer iter.Close()
+
+	// channels to enqueue oids and receive list entries (or errors) from concurrent workers
+	listOidChan := make(chan[string], radosIndexWorkers)
+	listEntryChan := make(chan[listEntry], radosIndexWorkers)
+
+	// asynchronously put objects to list on listOidChan
+	go func(){ 
+		for iter.Next() {
+			v.stats.Tick(&v.stats.Ops, &v.stats.ListOps)
+			oid := iter.Value()
+			if !v.isKeepBlock(oid) || !strings.HasPrefix(oid, prefix) {
+				continue
+			}
+			listOidChan <- oid
+		}
+		close(listOidChan)
+	}()
+
+	// start radosIndexWorkers to process listOids and output to listEntryChan
+	for i := 0; i < radosIndexWorkers; i++ {
+		go func() {
+			for oid := range listOidChan {
+				le := listEntry{
+					oid: oid
+				}
+				le.size, err := v.Size(oid)
+				if err != nil {
+					le.err = err
+					listEntryChan <- le
+					return
+				}
+				le.mtime, err := v.Mtime(oid)
+				if err != nil {
+					le.err = err
+					listEntryChan <- le
+					return
+				}
+				listEntryChan <- le
+			}
+		}
 	}
-	lister.buf = make([]rados.Key, 0, len(resp.Contents))
-	for _, key := range resp.Contents {
-		if !strings.HasPrefix(key.Key, lister.Prefix) {
-			log.Printf("warning: radosLister: Rados Pool.List(prefix=%q) returned key %q", lister.Prefix, key.Key)
+
+	// process listEntry entries from listEntryChan and output them
+	for le := range listEntryChan {
+		if le.err != nil {
+			// TODO could signal async work to stop here as we don't need the results anymore
+			err = le.err
 			continue
 		}
-		lister.buf = append(lister.buf, key)
-	}
-}
-
-func (lister *radosLister) pop() (k *rados.Key) {
-	if len(lister.buf) > 0 {
-		k = &lister.buf[0]
-		lister.buf = lister.buf[1:]
+		fmt.Fprintf(writer, "%s+%d %d\n", le.oid, le.size, le.mtime.UnixNano())
 	}
 	return
 }
@@ -928,24 +1277,3 @@ func (s *radospoolStats) TickErr(err error) {
 	s.statsTicker.TickErr(err, errType)
 }
 
-type radosIndexWorkItem struct {
-	Loc string
-	OutputChan chan[string]
-}
-
-// RunRadosIndexWorker receives PullRequests from pullq, invokes
-// PullItemAndProcess on each one. After each PR, it logs a message
-// indicating whether the pull was successful.
-func RunRadosIndexWorker(radosindexq *WorkQueue, v *RadosVolume) {
-	for item := range radosindexq.NextItem {
-		// TODO
-		pr := item.(PullRequest)
-		err := PullItemAndProcess(pr, keepClient)
-		pullq.DoneItem <- struct{}{}
-		if err == nil {
-			log.Printf("Pull %s success", pr)
-		} else {
-			log.Printf("Pull %s error: %s", pr, err)
-		}
-	}
-}
