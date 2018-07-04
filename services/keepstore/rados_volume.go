@@ -268,7 +268,7 @@ func (v *RadosVolume) Start() error {
 	if err != nil {
 		return fmt.Errorf("rados: error connecting to rados cluster: %v", err)
 	}
-	theConfig.debugLogf("rados: connected to cluster '%s' as user '%s'")
+	theConfig.debugLogf("rados: connected to cluster '%s' as user '%s'", v.User, v.Cluster)
 
 	fsid, err := v.conn.GetFSID()
 	if err != nil {
