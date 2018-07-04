@@ -55,7 +55,7 @@ var (
 )
 
 var (
-	zeroTime time.Time
+	RadosZeroTime time.Time
 )
 
 const (
@@ -616,7 +616,7 @@ func (v *RadosVolume) Mtime(loc string) (mtime time.Time, err error) {
 	}
 	mtime, err = time.Parse(time.RFC3339Nano, string(mtime_bytes[:RFC3339NanoMaxLen]))
 	if err != nil {
-		mtime = zeroTime
+		mtime = RadosZeroTime
 		v.stats.TickErr(err)
 		return
 	}
