@@ -36,8 +36,6 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"regexp"
 	"sort"
 	"strconv"
@@ -62,42 +60,31 @@ func init() {
 
 type radosStubObj struct {
 	Data   []byte
-	Size   uint64
 	Xattrs map[string][]byte
 }
 
-type radosStubHandler struct {
+type radosStubBackend struct {
 	sync.Mutex
 	objects map[string]*radosStubObj
 	race    chan chan struct{}
 }
 
-func newRadosStubHandler() *radosStubHandler {
-	return &radosStubHandler{
+func newRadosStubBackend() *radosStubBackend {
+	return &radosStubBackend{
 		objects: make(map[string]*radosStubObj),
 	}
 }
 
-func (h *radosStubHandler) TouchWithDate(hash string, t time.Time) {
-	obj, ok := h.objects[hash]
-	if !ok {
-		return
-	}
-	obj.Mtime = t
-}
-
-func (h *radosStubHandler) PutRaw(hash string, data []byte) {
+func (h *radosStubBackend) PutRaw(oid string, data []byte) {
 	h.Lock()
 	defer h.Unlock()
-	h.blobs[oid+"|"+hash] = &azBlob{
-		Data:        data,
-		Mtime:       time.Now(),
-		Metadata:    make(map[string]string),
-		Uncommitted: make(map[string][]byte),
+	h.blobs[oid] = &radosStubObj{
+		Data:   data,
+		Xattrs: make(map[string][]byte),
 	}
 }
 
-func (h *radosStubHandler) unlockAndRace() {
+func (h *radosStubBackend) unlockAndRace() {
 	if h.race == nil {
 		return
 	}
@@ -114,70 +101,53 @@ func (h *radosStubHandler) unlockAndRace() {
 
 type TestableRadosVolume struct {
 	*RadosVolume
-	radosHandler *radosStubHandler
-	radosStub    *httptest.Server
-	t            TB
+	radosStubBackend *radosStubBackend
+	t                TB
 }
 
 func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRadosVolume {
-	radosHandler := newRadosStubHandler()
-	radosStub := httptest.NewServer(radosHandler)
-
-	var azClient storage.Client
-
+	var v *RadosVolume
 	pool := radosTestPool
 	if pool == "" {
-		// Connect to stub instead of real Azure storage service
-		stubURLBase := strings.Split(radosStub.URL, "://")[1]
-		var err error
-		if azClient, err = storage.NewClient(fakeAccountName, fakeAccountKey, stubURLBase, storage.DefaultAPIVersion, false); err != nil {
-			t.Fatal(err)
+		// Connect using mock radosImplementation instead of real Ceph
+		radosStubBackend := newRadosStubBackend()
+		radosMock := &radosMockImpl{
+			b: radosStubBackend,
 		}
-		oid = "fakeoidname"
+		v = &RadosVolume{
+			Pool:             TestPool,
+			MonHost:          TestMonHost,
+			ReadOnly:         readonly,
+			RadosReplication: replication,
+			rados:            radosMock,
+		}
 	} else {
-		// Connect to real Azure storage service
-		accountKey, err := readKeyFromFile(azureStorageAccountKeyFile)
-		if err != nil {
-			t.Fatal(err)
+		// Connect to real Ceph using the real radosImplementation
+		v = &RadosVolume{
+			Pool:             pool,
+			KeyringFile:      radosKeyringFile,
+			MonHost:          radosMonHost,
+			Cluster:          radosCluster,
+			User:             radosUser,
+			ReadOnly:         readonly,
+			RadosReplication: replication,
 		}
-		azClient, err = storage.NewBasicClient(azureStorageAccountName, accountKey)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	bs := azClient.GetBlobService()
-	v := &RadosVolume{
-		ContainerName:    container,
-		ReadOnly:         readonly,
-		AzureReplication: replication,
-		azClient:         azClient,
-		container:        &azureContainer{ctr: bs.GetContainerReference(container)},
 	}
 
 	return &TestableRadosVolume{
-		RadosVolume:  v,
-		radosHandler: radosHandler,
-		radosStub:    radosStub,
-		t:            t,
+		RadosVolume:      v,
+		radosStubBackend: radosStubBackend,
+		t:                t,
 	}
 }
 
 var _ = check.Suite(&StubbedRadosSuite{})
 
 type StubbedRadosSuite struct {
-	volume            *TestableRadosVolume
-	origHTTPTransport http.RoundTripper
+	volume *TestableRadosVolume
 }
 
 func (s *StubbedRadosSuite) SetUpTest(c *check.C) {
-	s.origHTTPTransport = http.DefaultTransport
-	http.DefaultTransport = &http.Transport{
-		Dial: (&radosStubDialer{}).Dial,
-	}
-	azureWriteRaceInterval = time.Millisecond
-	azureWriteRacePollTime = time.Nanosecond
-
 	s.volume = NewTestableRadosVolume(c, false, 3)
 }
 
@@ -187,95 +157,15 @@ func (s *StubbedRadosSuite) TearDownTest(c *check.C) {
 }
 
 func TestRadosVolumeWithGeneric(t *testing.T) {
-	defer func(t http.RoundTripper) {
-		http.DefaultTransport = t
-	}(http.DefaultTransport)
-	http.DefaultTransport = &http.Transport{
-		Dial: (&radosStubDialer{}).Dial,
-	}
-	azureWriteRaceInterval = time.Millisecond
-	azureWriteRacePollTime = time.Nanosecond
 	DoGenericVolumeTests(t, func(t TB) TestableVolume {
-		return NewTestableRadosVolume(t, false, azureStorageReplication)
+		return NewTestableRadosVolume(t, false, radosReplication)
 	})
-}
-
-func TestRadosVolumeConcurrentRanges(t *testing.T) {
-	defer func(b int) {
-		azureMaxGetBytes = b
-	}(azureMaxGetBytes)
-
-	defer func(t http.RoundTripper) {
-		http.DefaultTransport = t
-	}(http.DefaultTransport)
-	http.DefaultTransport = &http.Transport{
-		Dial: (&radosStubDialer{}).Dial,
-	}
-	azureWriteRaceInterval = time.Millisecond
-	azureWriteRacePollTime = time.Nanosecond
-	// Test (BlockSize mod azureMaxGetBytes)==0 and !=0 cases
-	for _, azureMaxGetBytes = range []int{2 << 22, 2<<22 - 1} {
-		DoGenericVolumeTests(t, func(t TB) TestableVolume {
-			return NewTestableRadosVolume(t, false, azureStorageReplication)
-		})
-	}
 }
 
 func TestReadonlyRadosVolumeWithGeneric(t *testing.T) {
-	defer func(t http.RoundTripper) {
-		http.DefaultTransport = t
-	}(http.DefaultTransport)
-	http.DefaultTransport = &http.Transport{
-		Dial: (&radosStubDialer{}).Dial,
-	}
-	azureWriteRaceInterval = time.Millisecond
-	azureWriteRacePollTime = time.Nanosecond
 	DoGenericVolumeTests(t, func(t TB) TestableVolume {
-		return NewTestableRadosVolume(t, true, azureStorageReplication)
+		return NewTestableRadosVolume(t, true, radosReplication)
 	})
-}
-
-func TestRadosVolumeRangeFenceposts(t *testing.T) {
-	defer func(t http.RoundTripper) {
-		http.DefaultTransport = t
-	}(http.DefaultTransport)
-	http.DefaultTransport = &http.Transport{
-		Dial: (&radosStubDialer{}).Dial,
-	}
-
-	v := NewTestableRadosVolume(t, false, 3)
-	defer v.Teardown()
-
-	for _, size := range []int{
-		2<<22 - 1, // one <max read
-		2 << 22,   // one =max read
-		2<<22 + 1, // one =max read, one <max
-		2 << 23,   // two =max reads
-		BlockSize - 1,
-		BlockSize,
-	} {
-		data := make([]byte, size)
-		for i := range data {
-			data[i] = byte((i + 7) & 0xff)
-		}
-		hash := fmt.Sprintf("%x", md5.Sum(data))
-		err := v.Put(context.Background(), hash, data)
-		if err != nil {
-			t.Error(err)
-		}
-		gotData := make([]byte, len(data))
-		gotLen, err := v.Get(context.Background(), hash, gotData)
-		if err != nil {
-			t.Error(err)
-		}
-		gotHash := fmt.Sprintf("%x", md5.Sum(gotData))
-		if gotLen != size {
-			t.Errorf("length mismatch: got %d != %d", gotLen, size)
-		}
-		if gotHash != hash {
-			t.Errorf("hash mismatch: got %s != %s", gotHash, hash)
-		}
-	}
 }
 
 func TestRadosVolumeReplication(t *testing.T) {
@@ -289,22 +179,12 @@ func TestRadosVolumeReplication(t *testing.T) {
 }
 
 func TestRadosVolumeCreateBlobRace(t *testing.T) {
-	defer func(t http.RoundTripper) {
-		http.DefaultTransport = t
-	}(http.DefaultTransport)
-	http.DefaultTransport = &http.Transport{
-		Dial: (&radosStubDialer{}).Dial,
-	}
-
 	v := NewTestableRadosVolume(t, false, 3)
 	defer v.Teardown()
 
-	azureWriteRaceInterval = time.Second
-	azureWriteRacePollTime = time.Millisecond
-
 	var wg sync.WaitGroup
 
-	v.radosHandler.race = make(chan chan struct{})
+	v.radosStubBackend.race = make(chan chan struct{})
 
 	wg.Add(1)
 	go func() {
@@ -316,7 +196,7 @@ func TestRadosVolumeCreateBlobRace(t *testing.T) {
 	}()
 	continuePut := make(chan struct{})
 	// Wait for the stub's Put to create the empty blob
-	v.radosHandler.race <- continuePut
+	v.radosStubBackend.race <- continuePut
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -327,7 +207,7 @@ func TestRadosVolumeCreateBlobRace(t *testing.T) {
 		}
 	}()
 	// Wait for the stub's Get to get the empty blob
-	close(v.radosHandler.race)
+	close(v.radosStubBackend.race)
 	// Allow stub's Put to continue, so the real data is ready
 	// when the volume's Get retries
 	<-continuePut
@@ -336,18 +216,8 @@ func TestRadosVolumeCreateBlobRace(t *testing.T) {
 }
 
 func TestRadosVolumeCreateBlobRaceDeadline(t *testing.T) {
-	defer func(t http.RoundTripper) {
-		http.DefaultTransport = t
-	}(http.DefaultTransport)
-	http.DefaultTransport = &http.Transport{
-		Dial: (&radosStubDialer{}).Dial,
-	}
-
 	v := NewTestableRadosVolume(t, false, 3)
 	defer v.Teardown()
-
-	azureWriteRaceInterval = 2 * time.Second
-	azureWriteRacePollTime = 5 * time.Millisecond
 
 	v.PutRaw(TestHash, nil)
 
@@ -407,16 +277,9 @@ func TestRadosVolumeContextCancelCompare(t *testing.T) {
 }
 
 func testRadosVolumeContextCancel(t *testing.T, testFunc func(context.Context, *TestableRadosVolume) error) {
-	defer func(t http.RoundTripper) {
-		http.DefaultTransport = t
-	}(http.DefaultTransport)
-	http.DefaultTransport = &http.Transport{
-		Dial: (&radosStubDialer{}).Dial,
-	}
-
 	v := NewTestableRadosVolume(t, false, 3)
 	defer v.Teardown()
-	v.radosHandler.race = make(chan chan struct{})
+	v.radosStubBackend.race = make(chan chan struct{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	allDone := make(chan struct{})
@@ -430,10 +293,10 @@ func testRadosVolumeContextCancel(t *testing.T, testFunc func(context.Context, *
 	releaseHandler := make(chan struct{})
 	select {
 	case <-allDone:
-		t.Error("testFunc finished without waiting for v.radosHandler.race")
+		t.Error("testFunc finished without waiting for v.radosStubBackend.race")
 	case <-time.After(10 * time.Second):
 		t.Error("timed out waiting to enter handler")
-	case v.radosHandler.race <- releaseHandler:
+	case v.radosStubBackend.race <- releaseHandler:
 	}
 
 	cancel()
@@ -464,7 +327,7 @@ func (s *StubbedRadosSuite) TestStats(c *check.C) {
 	c.Check(err, check.NotNil)
 	c.Check(stats(), check.Matches, `.*"Ops":[^0],.*`)
 	c.Check(stats(), check.Matches, `.*"Errors":[^0],.*`)
-	c.Check(stats(), check.Matches, `.*"storage\.AzureStorageServiceError 404 \(404 Not Found\)":[^0].*`)
+	c.Check(stats(), check.Matches, `.*"rados\.RadosErrorNotFound.*?":[^0].*`)
 	c.Check(stats(), check.Matches, `.*"InBytes":0,.*`)
 
 	err = s.volume.Put(context.Background(), loc, []byte("foo"))
@@ -483,7 +346,7 @@ func (s *StubbedRadosSuite) TestConfig(c *check.C) {
 	var cfg Config
 	err := yaml.Unmarshal([]byte(`
 Volumes:
-  - Type: Azure
+  - Type: Rados
     StorageClasses: ["class_a", "class_b"]
 `), &cfg)
 
@@ -492,11 +355,11 @@ Volumes:
 }
 
 func (v *TestableRadosVolume) PutRaw(locator string, data []byte) {
-	v.radosHandler.PutRaw(v.ContainerName, locator, data)
+	v.radosStubBackend.PutRaw(locator, data)
 }
 
 func (v *TestableRadosVolume) TouchWithDate(locator string, lastPut time.Time) {
-	v.radosHandler.TouchWithDate(v.ContainerName, locator, lastPut)
+	v.setMtime(locator, lastPut)
 }
 
 func (v *TestableRadosVolume) Teardown() {
@@ -505,9 +368,7 @@ func (v *TestableRadosVolume) Teardown() {
 
 // radosMockImpl implements the radosImplemetation interface for testing purposes
 type radosMockImpl struct {
-	clock   *radosFakeClock
-	actions chan string
-	unblock chan struct{}
+	b *radosStubBackend
 }
 
 func (rados *radosMockImpl) Version() (major int, minor int, patch int) {
