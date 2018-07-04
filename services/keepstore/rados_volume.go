@@ -201,8 +201,7 @@ type RadosVolume struct {
 	startOnce sync.Once
 }
 
-// Volume type as specified in config file. Examples: "S3",
-// "Directory".
+// Volume type as specified in config file.
 func (*RadosVolume) Type() string {
 	return "Rados"
 }
