@@ -27,25 +27,20 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"encoding/base64"
 	"encoding/json"
-	"encoding/xml"
 	"flag"
-	"fmt"
-	"io/ioutil"
-	"math/rand"
-	"net"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ceph/go-ceph/rados"
 	"github.com/ghodss/yaml"
 	check "gopkg.in/check.v1"
+)
+
+const (
+	RadosMockTestPool    = "mocktestpool"
+	RadosMockTestMonHost = "mocktestmonhost"
 )
 
 var radosTestPool string
@@ -78,7 +73,7 @@ func newRadosStubBackend() *radosStubBackend {
 func (h *radosStubBackend) PutRaw(oid string, data []byte) {
 	h.Lock()
 	defer h.Unlock()
-	h.blobs[oid] = &radosStubObj{
+	h.objects[oid] = &radosStubObj{
 		Data:   data,
 		Xattrs: make(map[string][]byte),
 	}
@@ -107,16 +102,16 @@ type TestableRadosVolume struct {
 
 func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRadosVolume {
 	var v *RadosVolume
+	radosStubBackend := newRadosStubBackend()
 	pool := radosTestPool
 	if pool == "" {
 		// Connect using mock radosImplementation instead of real Ceph
-		radosStubBackend := newRadosStubBackend()
 		radosMock := &radosMockImpl{
 			b: radosStubBackend,
 		}
 		v = &RadosVolume{
-			Pool:             TestPool,
-			MonHost:          TestMonHost,
+			Pool:             RadosMockTestPool,
+			MonHost:          RadosMockTestMonHost,
 			ReadOnly:         readonly,
 			RadosReplication: replication,
 			rados:            radosMock,
@@ -153,7 +148,6 @@ func (s *StubbedRadosSuite) SetUpTest(c *check.C) {
 
 func (s *StubbedRadosSuite) TearDownTest(c *check.C) {
 	s.volume.Teardown()
-	http.DefaultTransport = s.origHTTPTransport
 }
 
 func TestRadosVolumeWithGeneric(t *testing.T) {
@@ -162,7 +156,7 @@ func TestRadosVolumeWithGeneric(t *testing.T) {
 	})
 }
 
-func TestReadonlyRadosVolumeWithGeneric(t *testing.T) {
+func TestRadosReadonlyVolumeWithGeneric(t *testing.T) {
 	DoGenericVolumeTests(t, func(t TB) TestableVolume {
 		return NewTestableRadosVolume(t, true, radosReplication)
 	})
@@ -362,9 +356,7 @@ func (v *TestableRadosVolume) TouchWithDate(locator string, lastPut time.Time) {
 	v.setMtime(locator, lastPut)
 }
 
-func (v *TestableRadosVolume) Teardown() {
-	v.radosStub.Close()
-}
+func (v *TestableRadosVolume) Teardown() {}
 
 // radosMockImpl implements the radosImplemetation interface for testing purposes
 type radosMockImpl struct {
