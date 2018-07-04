@@ -225,7 +225,7 @@ func (v *RadosVolume) Start() error {
 	}
 
 	if v.User == "" {
-		v.Cluster = "client.admin"
+		v.User = "client.admin"
 	}
 
 	if v.rados == nil {
@@ -268,7 +268,7 @@ func (v *RadosVolume) Start() error {
 	if err != nil {
 		return fmt.Errorf("rados: error connecting to rados cluster: %v", err)
 	}
-	theConfig.debugLogf("rados: connected to cluster '%s' as user '%s'", v.User, v.Cluster)
+	theConfig.debugLogf("rados: connected to cluster '%s' as user '%s'", v.Cluster, v.User)
 
 	fsid, err := v.conn.GetFSID()
 	if err != nil {
