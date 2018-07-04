@@ -41,6 +41,8 @@ import (
 const (
 	RadosMockTestPool    = "mocktestpool"
 	RadosMockTestMonHost = "mocktestmonhost"
+	RadosMockTotalSize   = 1 * 1024 * 1024 * 1024
+	RadosMockFSID        = "mockmock-mock-mock-mock-mockmockmock"
 )
 
 var radosTestPool string
@@ -60,13 +62,19 @@ type radosStubObj struct {
 
 type radosStubBackend struct {
 	sync.Mutex
-	objects map[string]*radosStubObj
-	race    chan chan struct{}
+	objects   map[string]*radosStubObj
+	config    map[string]string
+	totalSize uint64
+	fsid      string
+	race      chan chan struct{}
 }
 
 func newRadosStubBackend() *radosStubBackend {
 	return &radosStubBackend{
-		objects: make(map[string]*radosStubObj),
+		objects:   make(map[string]*radosStubObj),
+		config:    make(map[string]string),
+		totalSize: RadosMockTotalSize,
+		fsid:      RadosMockFSID,
 	}
 }
 
@@ -106,6 +114,7 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 	pool := radosTestPool
 	if pool == "" {
 		// Connect using mock radosImplementation instead of real Ceph
+		t.Log("rados: using mock radosImplementation")
 		radosMock := &radosMockImpl{
 			b: radosStubBackend,
 		}
@@ -118,6 +127,7 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 		}
 	} else {
 		// Connect to real Ceph using the real radosImplementation
+		t.Log("rados: using real radosImplementation")
 		v = &RadosVolume{
 			Pool:             pool,
 			KeyringFile:      radosKeyringFile,
@@ -128,6 +138,7 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 			RadosReplication: replication,
 		}
 	}
+	v.Start()
 
 	return &TestableRadosVolume{
 		RadosVolume:      v,
@@ -363,16 +374,14 @@ type radosMockImpl struct {
 	b *radosStubBackend
 }
 
-func (rados *radosMockImpl) Version() (major int, minor int, patch int) {
-	major = -1
-	minor = -1
-	patch = -1
-	return
+func (r *radosMockImpl) Version() (major int, minor int, patch int) {
+	// might as well return the real rados Version
+	return rados.Version()
 }
 
-func (rados *radosMockImpl) NewConnWithClusterAndUser(clusterName string, userName string) (conn radosConn, err error) {
+func (r *radosMockImpl) NewConnWithClusterAndUser(clusterName string, userName string) (conn radosConn, err error) {
 	conn = &radosMockConn{
-		radosMockImpl: rados,
+		radosMockImpl: r,
 		cluster:       clusterName,
 		user:          userName,
 	}
@@ -383,11 +392,10 @@ type radosMockConn struct {
 	*radosMockImpl
 	cluster string
 	user    string
-	config  map[string]string
 }
 
 func (conn *radosMockConn) SetConfigOption(option, value string) (err error) {
-	conn.config[option] = value
+	conn.b.config[option] = value
 	return
 }
 
@@ -396,10 +404,18 @@ func (conn *radosMockConn) Connect() (err error) {
 }
 
 func (conn *radosMockConn) GetFSID() (fsid string, err error) {
+	fsid = conn.b.fsid
 	return
 }
 
 func (conn *radosMockConn) GetClusterStats() (stat rados.ClusterStat, err error) {
+	stat.Kb = conn.b.totalSize
+	for _, obj := range conn.b.objects {
+		size := len(obj.Data)
+		stat.Kb_used += uint64(size)
+		stat.Num_objects++
+	}
+	stat.Kb_avail = stat.Kb - stat.Kb_used
 	return
 }
 
