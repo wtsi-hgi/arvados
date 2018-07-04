@@ -281,14 +281,14 @@ func (v *RadosVolume) Start() error {
 	if err != nil {
 		return fmt.Errorf("rados: error getting rados cluster stats: %v", err)
 	}
-	theConfig.debugLogf("rados: ceph cluster %s has %.1f GiB with %.1f GiB used in %d objects and %.1f GiB available", v.Cluster, float64(cs.Kb)/1024/1024, float64(cs.Kb_used)/1024/1024, cs.Num_objects, float64(cs.Kb_avail)/1024/1024)
+	theConfig.debugLogf("rados: cluster %s has %.1f GiB with %.1f GiB used in %d objects and %.1f GiB available", v.Cluster, float64(cs.Kb)/1024/1024, float64(cs.Kb_used)/1024/1024, cs.Num_objects, float64(cs.Kb_avail)/1024/1024)
 
 	pools, err := v.conn.ListPools()
 	if err != nil {
 		return fmt.Errorf("rados: error listing pools: %v", err)
 	}
 	if !stringInSlice(v.Pool, pools) {
-		return fmt.Errorf("rados: pool '%s' not present in ceph cluster. available pools in this cluster are: %v", v.Pool, pools)
+		return fmt.Errorf("rados: pool '%s' not present in cluster %s. available pools in this cluster are: %v", v.Pool, v.Cluster, pools)
 	}
 
 	ioctx, err := v.conn.OpenIOContext(v.Pool)
