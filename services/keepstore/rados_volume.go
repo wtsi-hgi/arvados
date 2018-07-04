@@ -1301,7 +1301,9 @@ func (v *RadosVolume) listObjects(filterFunc func(string) (bool, error), mapFunc
 			if listErr != nil {
 				break
 			}
-			listLocChan <- loc
+			if include {
+				listLocChan <- loc
+			}
 		}
 		listLocErrChan <- listErr
 		close(listLocChan)
