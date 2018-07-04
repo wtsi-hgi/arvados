@@ -142,6 +142,53 @@ func init() {
 
 }
 
+// Define our own minimal interface types for rados so we can mock them
+type radosImplementation interface {
+	Version() (int, int, int)
+	NewConnWithClusterAndUser(clusterName string, userName string) (*radosConn, error)
+}
+
+type radosConn interface {
+	SetConfigOption(option, value string) error
+	Connect() error
+	GetFSID() (fsid string, err error)
+	GetClusterStats() (stat rados.ClusterStat, err error)
+	ListPools() (names []string, err error)
+	OpenIOContext(pool string) (*radosIOContext, error)
+}
+
+type radosIOContext interface {
+	Delete(oid string) error
+	GetPoolStats() (stat rados.PoolStat, err error)
+	GetXattr(object string, name string, data []byte) (int, error)
+	Iter() (*radosIter, error)
+	LockExclusive(oid, name, cookie, desc string, duration time.Duration, flags *byte) (int, error)
+	LockShared(oid, name, cookie, tag, desc string, duration time.Duration, flags *byte) (int, error)
+	Read(oid string, data []byte, offset uint64) (int, error)
+	SetNamespace(namespace string)
+	SetXattr(object string, name string, data []byte) error
+	Stat(object string) (stat ObjectStat, err error)
+	Unlock(oid, name, cookie string) (int, error)
+	WriteFull(oid string, data []byte) error
+}
+
+type radosIter interface {
+	Next() bool
+	Value() string
+	Close()
+}
+
+// Implement the real rados 
+type radosRealImpl struct{}
+
+func (r *radosRealImpl) Version() (int, int, int) {
+	return rados.Version()
+}
+
+func (r *radosRealImpl) NewConnWithClusterAndUser(clusterName string, userName string) (*radosConn, error) {
+	return rados.NewConnWithClusterAndUser(clusterName, userName)
+}
+
 // RadosVolume implements Volume using an Rados pool.
 type RadosVolume struct {
 	Pool             string
@@ -159,8 +206,9 @@ type RadosVolume struct {
 	ReadOnly       bool
 	StorageClasses []string
 
-	conn *rados.Conn
-	ioctx *rados.IOContext
+	rados *radosImplementation
+	conn *radosConn
+	ioctx *radosIOContext
 	stats radospoolStats
 
 	startOnce sync.Once
@@ -194,10 +242,14 @@ func (v *RadosVolume) Start() error {
 		v.Cluster = "client.admin"
 	}
 
-	rv_major, rv_minor, rv_patch := rados.Version()
+	if !v.rados {
+		v.rados = &radosRealImpl{}
+	}
+
+	rv_major, rv_minor, rv_patch := v.rados.Version()
 	theConfig.debugLogf("rados: using librados version %d.%d.%d", rv_major, rv_minor, rv_patch)
 
-	v.conn, err := rados.NewConnWithClusterAndUser(v.Cluster, v.User)
+	v.conn, err := v.rados.NewConnWithClusterAndUserFunc(v.Cluster, v.User)
 	if err != nil {
 		return fmt.Errorf("rados: error creating rados connection to ceph cluster '%s' for user '%s': %v", v.Cluster, v.User, err)
 	}
@@ -990,9 +1042,9 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 				return
 			default:
 				if exclusive {
-					res, err = v.ioctx.lockExclusive(loc, name, cookie, desc, timeout, nil)
+					res, err = v.ioctx.LockExclusive(loc, name, cookie, desc, timeout, nil)
 				} else {
-					res, err = v.ioctx.lockShared(loc, name, cookie, "", desc, timeout, nil)
+					res, err = v.ioctx.LockShared(loc, name, cookie, "", desc, timeout, nil)
 				}
 				v.stats.Tick(&v.stats.Ops, &v.stats.LockOps)
 				v.stats.TickErr(err)
@@ -1059,7 +1111,7 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 
 // unlock previously obtained data lock
 func (v *RadosVolume) unlock(loc string, name string, cookie string) (err error) {
-	res, err = v.ioctx.unlock(loc, name, cookie)
+	res, err = v.ioctx.Unlock(loc, name, cookie)
 	v.stats.Tick(&v.stats.Ops, &v.stats.UnlockOps)
 	v.stats.TickErr(err)
 	if err != nil {
