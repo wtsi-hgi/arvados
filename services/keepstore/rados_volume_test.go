@@ -818,26 +818,26 @@ type radosMockIter struct {
 }
 
 func (iter *radosMockIter) Next() (next bool) {
-	log.Debugf("radosmock: iter.Next()")
+	log.Debugf("radosmock: iter.Next() iter.current=%d len(iter.oids)=%d", iter.current, len(iter.oids))
 	iter.current++
+	next = true
 	if iter.current >= len(iter.oids) {
 		next = false
 	}
-	next = true
-	log.Debugf("radosmock: iter.Next() returning next=%v", next)
+	log.Debugf("radosmock: iter.Next() iter.current=%d len(iter.oids)=%d, returning next=%v", iter.current, len(iter.oids), next)
 	return
 }
 
 func (iter *radosMockIter) Value() (value string) {
-	log.Debugf("radosmock: iter.Value()")
+	log.Debugf("radosmock: iter.Value() iter.current=%d len(iter.oids)=%d", iter.current, len(iter.oids))
 	if iter.current >= 0 && iter.current < len(iter.oids) {
 		value = iter.oids[iter.current]
 	}
-	log.Debugf("radosmock: iter.Value() returning value=%s", value)
+	log.Debugf("radosmock: iter.Value() iter.current=%d len(iter.oids)=%d, returning value=%s", iter.current, len(iter.oids), value)
 	return
 }
 
 func (iter *radosMockIter) Close() {
-	log.Debugf("radosmock: iter.Close()")
+	log.Debugf("radosmock: iter.Close() iter.current=%d len(iter.oids)=%d", iter.current, len(iter.oids))
 	return
 }
