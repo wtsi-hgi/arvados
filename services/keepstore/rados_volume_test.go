@@ -143,7 +143,7 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 	pool := radosTestPool
 	if pool == "" {
 		// Connect using mock radosImplementation instead of real Ceph
-		t.Log("rados: using mock radosImplementation")
+		log.Infof("rados: using mock radosImplementation")
 		radosMock := &radosMockImpl{
 			b: radosStubBackend,
 		}
@@ -156,7 +156,7 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 		}
 	} else {
 		// Connect to real Ceph using the real radosImplementation
-		t.Log("rados: using real radosImplementation")
+		log.Infof("rados: using real radosImplementation")
 		v = &RadosVolume{
 			Pool:             pool,
 			KeyringFile:      radosKeyringFile,
