@@ -389,18 +389,21 @@ func (v *RadosVolume) Start() error {
 //
 // len(buf) will not exceed BlockSize.
 func (v *RadosVolume) Get(ctx context.Context, loc string, buf []byte) (n int, err error) {
-	log.Debugf("rados: Get")
+	log.Debugf("rados: Get loc=%s", loc)
 	if v.isEmptyBlock(loc) {
 		buf = buf[:0]
+		log.Debugf("rados: Get loc=%s is empty, returning an empty block", loc)
 		return 0, nil
 	}
 
 	size, err := v.size(loc)
 	if err != nil {
+		log.Debugf("rados: Get failed to get size for loc=%s: %s", loc, err)
 		return
 	}
 	if size > uint64(len(buf)) {
 		err = fmt.Errorf("rados: Get has %d bytes for '%s' but supplied buffer was only %d bytes", size, loc, len(buf))
+		log.Debugf("rados: Get got unexpected size loc=%s: %s", loc, err)
 		return
 	}
 
@@ -408,10 +411,14 @@ func (v *RadosVolume) Get(ctx context.Context, loc string, buf []byte) (n int, e
 	// still in progress
 	lockCookie, err := v.lockShared(ctx, loc, RadosLockData, "Get", v.ReadTimeout, false)
 	if err != nil {
+		log.Debugf("rados: Get failed to get shared %s lock for loc=%s: %s", RadosLockData, loc, err)
 		return
 	}
 	defer func() {
 		lockErr := v.unlock(loc, RadosLockData, lockCookie)
+		if lockErr != nil {
+			log.Debugf("rados: Get failed to unlock %s lock for loc=%s with cookie=%s: %s", RadosLockData, loc, lockCookie, lockErr)
+		}
 		if err == nil && lockErr != nil {
 			err = lockErr
 		}
@@ -423,33 +430,38 @@ func (v *RadosVolume) Get(ctx context.Context, loc string, buf []byte) (n int, e
 	// so wrap it in a loop that can handle short reads and keep reading
 	// until we get size bytes, just in case.
 	n = 0
-	off := uint64(0)
+	offset := uint64(0)
+GetReadUntil:
 	for {
 		read_bytes := 0
 		select {
 		case <-ctx.Done():
 			err = ctx.Err()
+			log.Debugf("rados: Get failed to read loc=%s before context expired: %s", loc, err)
 			return
 		default:
-			read_bytes, err = v.ioctx.Read(loc, buf[n:], off)
+			read_bytes, err = v.ioctx.Read(loc, buf[n:], offset)
 			err = v.translateError(err)
 			v.stats.Tick(&v.stats.Ops, &v.stats.GetOps)
 			v.stats.TickErr(err)
 			if err != nil {
+				log.Debugf("rados: Get read failed for loc=%s at offset=%s: %s", loc, offset, err)
 				return
 			}
 			v.stats.TickInBytes(uint64(read_bytes))
 			n += read_bytes
-			off += uint64(read_bytes)
+			offset += uint64(read_bytes)
 			if uint64(n) >= size {
-				break
+				log.Debugf("rados: Get have full read for loc=%s", loc)
+				break GetReadUntil
 			}
 			if read_bytes == 0 {
-				log.Printf("rados warning: %s: Get read 0 bytes from %s at offset %d after reading %d bytes out of %d", v, loc, off, n, size)
+				log.Printf("rados warning: %s: Get read 0 bytes from %s at offset %d after reading %d bytes out of %d", v, loc, offset, n, size)
 				time.Sleep(1 * time.Second)
 			}
 		}
 	}
+	log.Debugf("rados: Get returning after reading %d bytes from loc=%s with err=%s", n, loc, err)
 	return
 }
 
@@ -466,13 +478,20 @@ func (v *RadosVolume) Compare(ctx context.Context, loc string, expect []byte) (e
 		return
 	}
 	if n != len(expect) {
-		err = fmt.Errorf("rados: Get returned %d bytes but we were expecting %d", n, len(expect))
+		err = fmt.Errorf("rados: Compare: Get returned %d bytes for %s but we were expecting %d", n, loc, len(expect))
 		return
 	}
-	expectHash := loc[:32]
+	var expectHash string
+	if v.isKeepBlock(loc) {
+		expectHash = loc[:32]
+		log.Debugf("rados: Compare using first 32 characters of loc=%s as expected md5 hash: %s", loc, expectHash)
+	} else {
+		expectHash = fmt.Sprintf("%x", md5.Sum(expect))
+		log.Debugf("rados: Compare loc=%s does not appear to be a valid keep locator, calculated expected md5 hash: %s", loc, expectHash)
+	}
 	hash := fmt.Sprintf("%x", md5.Sum(buf))
 	if hash != expectHash {
-		err = fmt.Errorf("rados: Get returned object with md5 hash '%s' but we were expecting '%s'", hash, expectHash)
+		err = fmt.Errorf("rados: Compare Get returned object with md5 hash '%s' but we were expecting '%s'", hash, expectHash)
 		return
 	}
 	return
@@ -662,7 +681,7 @@ func (v *RadosVolume) Mtime(loc string) (mtime time.Time, err error) {
 		v.stats.TickErr(err)
 		return
 	}
-	mtime, err = time.Parse(time.RFC3339Nano, string(mtime_bytes[:RFC3339NanoMaxLen]))
+	mtime, err = time.Parse(time.RFC3339Nano, strings.TrimSpace(string(mtime_bytes[:RFC3339NanoMaxLen])))
 	if err != nil {
 		mtime = RadosZeroTime
 		v.stats.TickErr(err)
@@ -1094,8 +1113,10 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 				res := 0
 				if exclusive {
 					res, err = v.ioctx.LockExclusive(loc, name, lockCookie, desc, time.Duration(timeout), nil)
+					log.Debugf("rados: lock call to rados LockExclusive for %s lock on loc=%s with lockCookie=%s returned res=%v err=%v", name, loc, lockCookie, res, err)
 				} else {
 					res, err = v.ioctx.LockShared(loc, name, lockCookie, "", desc, time.Duration(timeout), nil)
+					log.Debugf("rados: lock call to rados LockShared for %s lock on loc=%s with lockCookie=%s returned res=%v err=%v", name, loc, lockCookie, res, err)
 				}
 				v.stats.Tick(&v.stats.Ops, &v.stats.LockOps)
 				v.stats.TickErr(err)
@@ -1130,12 +1151,13 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 								break LoopUntilLocked
 							}
 							err = os.ErrNotExist
+							log.Debugf("rados: lock created but loc=%s should not exist and was deleted", loc)
 							break LoopUntilLocked
 						}
 					}
 					locked = true
 				default:
-					err = fmt.Errorf("rados: attempting to get exclusive %s lock for %s on object %s: unexpected non-error return value %d from lockExclusive", name, desc, loc, res)
+					err = fmt.Errorf("rados: attempting to get %s lock for %s on object %s: unexpected non-error return value %d from underlying lock function", name, desc, loc, res)
 					return
 				}
 			}
@@ -1151,6 +1173,7 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 		err = ctx.Err()
 	}
 
+	log.Debugf("rados: lock %s on loc=%s returning with lockCookie=%s err=%v", name, loc, lockCookie, err)
 	return
 }
 
@@ -1365,6 +1388,7 @@ func (v *RadosVolume) listObjects(filterFunc func(string) (bool, error), mapFunc
 	// asynchronously put objects to list on listLocChan
 	go func() {
 		var listErr error
+	ObjectIteratorLoop:
 		for iter.Next() {
 			v.stats.Tick(&v.stats.Ops, &v.stats.ListOps)
 			loc := iter.Value()
@@ -1373,7 +1397,7 @@ func (v *RadosVolume) listObjects(filterFunc func(string) (bool, error), mapFunc
 			}
 			include, listErr := filterFunc(loc)
 			if listErr != nil {
-				break
+				break ObjectIteratorLoop
 			}
 			if include {
 				listLocChan <- loc

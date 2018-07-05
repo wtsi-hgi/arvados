@@ -116,24 +116,6 @@ func newRadosStubBackend(numReplicas uint64) *radosStubBackend {
 	}
 }
 
-func (h *radosStubBackend) PutRaw(pool string, namespace string, oid string, data []byte) {
-	h.Lock()
-	defer h.Unlock()
-	_, ok := h.pools[pool]
-	if !ok {
-		h.pools[pool] = newRadosStubPool()
-	}
-	_, ok = h.pools[pool].namespaces[namespace]
-	if !ok {
-		h.pools[pool].namespaces[namespace] = newRadosStubNamespace()
-	}
-
-	_, ok = h.pools[pool].namespaces[namespace].objects[oid]
-	if !ok {
-		h.pools[pool].namespaces[namespace].objects[oid] = newRadosStubObj(data)
-	}
-}
-
 func (h *radosStubBackend) unlockAndRace() {
 	if h.race == nil {
 		return
@@ -412,10 +394,16 @@ Volumes:
 }
 
 func (v *TestableRadosVolume) PutRaw(locator string, data []byte) {
-	v.radosStubBackend.PutRaw(v.Pool, RadosKeepNamespace, locator, data)
+	log.Debugf("radostest: PutRaw putting locator=%s len(data)=%d data='%s'", locator, len(data), data)
+	// no real benefit to PutRaw over Put when using the mock, just call Put
+	err := v.Put(context.Background(), locator, data)
+	if err != nil {
+		v.t.Fatalf("PutRaw failed to put locator %s: %s", locator, err)
+	}
 }
 
 func (v *TestableRadosVolume) TouchWithDate(locator string, lastPut time.Time) {
+	log.Debugf("radostest: TouchWithDate touching %s with date %v", locator, lastPut)
 	v.setMtime(locator, lastPut)
 }
 
@@ -574,7 +562,7 @@ func (ioctx *radosMockIoctx) GetPoolStats() (stat rados.PoolStat, err error) {
 }
 
 func (ioctx *radosMockIoctx) GetXattr(oid string, name string, data []byte) (n int, err error) {
-	log.Debugf("radosmock: GetXattr oid=%s name=%s", oid, name)
+	log.Debugf("radosmock: GetXattr oid=%s name=%s len(data)=%d", oid, name, len(data))
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -583,11 +571,12 @@ func (ioctx *radosMockIoctx) GetXattr(oid string, name string, data []byte) (n i
 		err = rados.RadosErrorNotFound
 		return
 	}
-	xv, ok := obj.xattrs[RadosXattrTrash]
+	xv, ok := obj.xattrs[name]
 	if !ok {
 		err = rados.RadosErrorNotFound
 	}
 	n = copy(data, xv)
+	log.Debugf("radosmock: GetXattr oid=%s name=%s data='%s', returning n=%d err=%v", oid, name, data, n, err)
 	return
 }
 
@@ -706,7 +695,7 @@ func (ioctx *radosMockIoctx) SetNamespace(namespace string) {
 }
 
 func (ioctx *radosMockIoctx) SetXattr(oid string, name string, data []byte) (err error) {
-	log.Debugf("radosmock: SetXattr oid=%s name=%s", oid, name)
+	log.Debugf("radosmock: SetXattr oid=%s name=%s len(data)=%d data='%s'", oid, name, len(data), data)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -715,7 +704,9 @@ func (ioctx *radosMockIoctx) SetXattr(oid string, name string, data []byte) (err
 		err = rados.RadosErrorNotFound
 		return
 	}
-	obj.xattrs[name] = data
+	d := make([]byte, len(data))
+	copy(d, data)
+	obj.xattrs[name] = d
 	return
 }
 
