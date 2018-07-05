@@ -202,11 +202,11 @@ func TestRadosVolumeWithGeneric(t *testing.T) {
 	})
 }
 
-// func TestRadosReadonlyVolumeWithGeneric(t *testing.T) {
-// 	DoGenericVolumeTests(t, func(t TB) TestableVolume {
-// 		return NewTestableRadosVolume(t, true, radosReplication)
-// 	})
-// }
+func TestRadosReadonlyVolumeWithGeneric(t *testing.T) {
+	DoGenericVolumeTests(t, func(t TB) TestableVolume {
+		return NewTestableRadosVolume(t, true, radosReplication)
+	})
+}
 
 // func TestRadosVolumeReplication(t *testing.T) {
 // 	for r := 1; r <= 4; r++ {
@@ -396,7 +396,13 @@ Volumes:
 
 func (v *TestableRadosVolume) PutRaw(locator string, data []byte) {
 	radosTracef("radostest: PutRaw putting locator=%s len(data)=%d data='%s'", locator, len(data), data)
-	// no real benefit to PutRaw over Put when using the mock, just call Put
+
+	// need to temporarily disable ReadOnly status and restore it after the call to Put
+	defer func(ro bool) {
+		v.ReadOnly = ro
+	}(v.ReadOnly)
+
+	v.ReadOnly = false
 	err := v.Put(context.Background(), locator, data)
 	if err != nil {
 		v.t.Fatalf("PutRaw failed to put locator %s: %s", locator, err)
