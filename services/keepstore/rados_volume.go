@@ -26,8 +26,8 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"crypto/md5"
 	"flag"
 	"fmt"
 	"io"
@@ -389,21 +389,16 @@ func (v *RadosVolume) Start() error {
 //
 // len(buf) will not exceed BlockSize.
 func (v *RadosVolume) Get(ctx context.Context, loc string, buf []byte) (n int, err error) {
-	log.Debugf("rados: Get loc=%s", loc)
-	if v.isEmptyBlock(loc) {
-		buf = buf[:0]
-		log.Debugf("rados: Get loc=%s is empty, returning an empty block", loc)
-		return 0, nil
-	}
+	log.Debugf("rados: Get loc=%s len(buf)=%d", loc, len(buf))
 
 	size, err := v.size(loc)
 	if err != nil {
-		log.Debugf("rados: Get failed to get size for loc=%s: %s", loc, err)
+		log.Debugf("rados: Get loc=%s len(buf)=%d failed to get size, returning n=%d err=%v", loc, len(buf), n, err)
 		return
 	}
 	if size > uint64(len(buf)) {
 		err = fmt.Errorf("rados: Get has %d bytes for '%s' but supplied buffer was only %d bytes", size, loc, len(buf))
-		log.Debugf("rados: Get got unexpected size loc=%s: %s", loc, err)
+		log.Debugf("rados: Get loc=%s len(buf)=%d unexpected size %d larger than buffer, returning n=%d err=%v", loc, len(buf), size, n, err)
 		return
 	}
 
@@ -411,17 +406,18 @@ func (v *RadosVolume) Get(ctx context.Context, loc string, buf []byte) (n int, e
 	// still in progress
 	lockCookie, err := v.lockShared(ctx, loc, RadosLockData, "Get", v.ReadTimeout, false)
 	if err != nil {
-		log.Debugf("rados: Get failed to get shared %s lock for loc=%s: %s", RadosLockData, loc, err)
+		log.Debugf("rados: Get loc=%s len(buf)=%d size=%d failed to get shared lock, returning n=%d err=%v", loc, len(buf), size, n, err)
 		return
 	}
 	defer func() {
 		lockErr := v.unlock(loc, RadosLockData, lockCookie)
 		if lockErr != nil {
-			log.Debugf("rados: Get failed to unlock %s lock for loc=%s with cookie=%s: %s", RadosLockData, loc, lockCookie, lockErr)
+			log.Debugf("rados: Get loc=%s len(buf)=%d size=%d deferred unlock failed to unlock with cookie=%s", loc, len(buf), size, lockCookie)
 		}
 		if err == nil && lockErr != nil {
 			err = lockErr
 		}
+		log.Debugf("rados: Get loc=%s len(buf)=%d size=%d deferred unlock returning n=%d err=%v", loc, len(buf), size, n, err)
 		return
 	}()
 
@@ -437,7 +433,7 @@ GetReadUntil:
 		select {
 		case <-ctx.Done():
 			err = ctx.Err()
-			log.Debugf("rados: Get failed to read loc=%s before context expired: %s", loc, err)
+			log.Debugf("rados: Get loc=%s len(buf)=%d size=%d failed to read before context expired, returning n=%d err=%v", loc, len(buf), size, n, err)
 			return
 		default:
 			read_bytes, err = v.ioctx.Read(loc, buf[n:], offset)
@@ -445,14 +441,14 @@ GetReadUntil:
 			v.stats.Tick(&v.stats.Ops, &v.stats.GetOps)
 			v.stats.TickErr(err)
 			if err != nil {
-				log.Debugf("rados: Get read failed for loc=%s at offset=%s: %s", loc, offset, err)
+				log.Debugf("rados: Get loc=%s len(buf)=%d size=%d read failed at offset=%d, returning n=%d err=%v", loc, len(buf), size, offset, n, err)
 				return
 			}
 			v.stats.TickInBytes(uint64(read_bytes))
 			n += read_bytes
 			offset += uint64(read_bytes)
 			if uint64(n) >= size {
-				log.Debugf("rados: Get have full read for loc=%s", loc)
+				log.Debugf("rados: Get loc=%s len(buf)=%d size=%d offset=%d n=%d have full read, breaking out of read loop", loc, len(buf), size, offset, n)
 				break GetReadUntil
 			}
 			if read_bytes == 0 {
@@ -461,7 +457,8 @@ GetReadUntil:
 			}
 		}
 	}
-	log.Debugf("rados: Get returning after reading %d bytes from loc=%s with err=%s", n, loc, err)
+
+	log.Debugf("rados: Get loc=%s len(buf)=%d size=%d offset=%d read complete, returning n=%d err=%v", loc, len(buf), size, offset, n, err)
 	return
 }
 
@@ -471,29 +468,50 @@ GetReadUntil:
 // data on disk matches the expected hash), or whatever error
 // was encountered opening/reading the stored data.
 func (v *RadosVolume) Compare(ctx context.Context, loc string, expect []byte) (err error) {
-	log.Debugf("rados: Compare")
-	buf := make([]byte, len(expect))
+	log.Debugf("rados: Compare loc=%s len(expect)=%d", loc, len(expect))
+
+	// get size of stored block
+	size, err := v.size(loc)
+	if err != nil {
+		log.Debugf("rados: Compare loc=%s failed to get size of object, returning err=%v", loc, err)
+		return
+	}
+
+	// compare size of stored block to expected data length
+	if size != uint64(len(expect)) {
+		err = DiskHashError
+		log.Debugf("rados: Compare loc=%s size %d is not equal to length of expected data %d, returning err=%v", loc, size, len(expect), err)
+		return
+	}
+
+	// get stored block
+	buf := make([]byte, size)
 	n, err := v.Get(ctx, loc, buf)
 	if err != nil {
+		log.Debugf("rados: Compare loc=%s failed to get object, returning err=%v", loc, err)
 		return
 	}
+
+	// compare size of returned data to expected data length
 	if n != len(expect) {
-		err = fmt.Errorf("rados: Compare: Get returned %d bytes for %s but we were expecting %d", n, loc, len(expect))
+		err = DiskHashError
+		log.Debugf("rados: Compare loc=%s returned %d bytes but we were expecting %d, returning err=%v", loc, n, len(expect), err)
 		return
 	}
-	var expectHash string
-	if v.isKeepBlock(loc) {
-		expectHash = loc[:32]
-		log.Debugf("rados: Compare using first 32 characters of loc=%s as expected md5 hash: %s", loc, expectHash)
-	} else {
-		expectHash = fmt.Sprintf("%x", md5.Sum(expect))
-		log.Debugf("rados: Compare loc=%s does not appear to be a valid keep locator, calculated expected md5 hash: %s", loc, expectHash)
-	}
-	hash := fmt.Sprintf("%x", md5.Sum(buf))
-	if hash != expectHash {
-		err = fmt.Errorf("rados: Compare Get returned object with md5 hash '%s' but we were expecting '%s'", hash, expectHash)
+
+	// compare returned data to expected data byte by byte
+	if bytes.Compare(expect, buf) == 0 {
+		err = nil
+		log.Debugf("rados: Compare loc=%s data returned by Get matches expected data, returning err=%v", loc, err)
 		return
 	}
+
+	// data does not match, check whether it is corrupt or a hash collision
+	expectMD5 := loc[:32]
+	log.Debugf("rados: Compare loc=%s using the first 32 characters of loc as the expected md5 hash: %s", loc, expectMD5)
+	err = collisionOrCorrupt(expectMD5, buf, nil, nil)
+
+	log.Debugf("rados: Compare loc=%s after call to collisionOrCorrupt, returning err=%v", loc, err)
 	return
 }
 
@@ -526,8 +544,9 @@ func (v *RadosVolume) Compare(ctx context.Context, loc string, expect []byte) (e
 // Put should not verify that loc==hash(block): this is the
 // caller's responsibility.
 func (v *RadosVolume) Put(ctx context.Context, loc string, block []byte) (err error) {
-	log.Debugf("rados: Put loc=%s", loc)
+	log.Debugf("rados: Put loc=%s len(block)=%d", loc, len(block))
 	if v.ReadOnly {
+		log.Debugf("rados: Put loc=%s len(block)=%d volume is read-only, returning err=%v", loc, len(block), err)
 		return MethodDisabledError
 	}
 
@@ -536,6 +555,7 @@ func (v *RadosVolume) Put(ctx context.Context, loc string, block []byte) (err er
 	// to facilitate the lock, but that is ok as we are about to write to it)
 	lockCookie, err := v.lockExclusive(ctx, loc, RadosLockData, "Put", v.WriteTimeout, true)
 	if err != nil {
+		log.Debugf("rados: Put loc=%s len(block)=%d failed to obtain lock, returning err=%v", loc, len(block), err)
 		return
 	}
 	defer func() {
@@ -543,33 +563,37 @@ func (v *RadosVolume) Put(ctx context.Context, loc string, block []byte) (err er
 		if err == nil && lockErr != nil {
 			err = lockErr
 		}
+		log.Debugf("rados: Put loc=%s len(block)=%d deferred unlock, returning err=%v", loc, len(block), err)
 		return
 	}()
 
-	// only store non-empty blocks
+	// Only write non-empty blocks (as some versions of go-ceph have a problem writing empty buffers)
+	// Note that the lock will have already created an empty object so the write is already done.
 	if !v.isEmptyBlock(loc) {
 		err = v.ioctx.WriteFull(loc, block)
 		err = v.translateError(err)
 		v.stats.Tick(&v.stats.Ops, &v.stats.PutOps)
 		v.stats.TickErr(err)
 		if err != nil {
+			log.Debugf("rados: Put loc=%s len(block)=%d failed to write block, returning err=%v", loc, len(block), err)
 			return
 		}
 		v.stats.TickOutBytes(uint64(len(block)))
 	}
 
-	// Since we are about to put this object, it is no longer trash.
+	// Since we have just put this object, it is no longer trash.
 	// Do this before Touch so that v.exists() will be true when
 	// Touch is invoked.
 	err = v.markNotTrash(loc)
 	if err != nil {
+		log.Debugf("rados: Put loc=%s len(block)=%d failed to mark block as not trash, returning err=%v", loc, len(block), err)
 		return
 	}
 
 	// Touch object to set Mtime on the object to the current time.
 	err = v.Touch(loc)
 
-	log.Debugf("rados: finished with Put loc=%s err=%s", loc, err)
+	log.Debugf("rados: Put loc=%s len(block)=%d complete, returning err=%v", loc, len(block), err)
 	return
 }
 
@@ -636,17 +660,20 @@ func (v *RadosVolume) Touch(loc string) (err error) {
 // exists returns a non-nil error only if the existence of the object
 // could not be determined
 func (v *RadosVolume) exists(loc string) (exists bool, err error) {
-	log.Debugf("rados: exists")
+	log.Debugf("rados: exists loc=%s", loc)
 	exists = false
 	_, err = v.isTrash(loc)
 	if os.IsNotExist(err) {
 		err = nil
+		log.Debugf("rados: exists loc=%s object does not exist at all, returning exists=%v err=%v", loc, exists, err)
 		return
 	}
 	if err != nil {
+		log.Debugf("rados: exists loc=%s got error from isTrash, returning exists=%v err=%v", loc, exists, err)
 		return
 	}
 	exists = true
+	log.Debugf("rados: exists loc=%s no errors from isTrash, so this block exists, returning exists=%v err=%v", loc, exists, err)
 	return
 }
 
@@ -1048,7 +1075,7 @@ func (*RadosVolume) Examples() []Volume {
 // size must return a non-nil error if the given block is not
 // found or the size could not be retrieved.
 func (v *RadosVolume) size(loc string) (size uint64, err error) {
-	log.Debugf("rados: size")
+	log.Debugf("rados: size loc=%s", loc)
 	stat, err := v.ioctx.Stat(loc)
 	err = v.translateError(err)
 	v.stats.Tick(&v.stats.Ops, &v.stats.StatOps)
@@ -1211,17 +1238,19 @@ func (v *RadosVolume) delete(loc string) (err error) {
 // otherwise it returns false. If the object does not exist,
 // it returns an error that fulfills os.IsNotExist()
 func (v *RadosVolume) isTrash(loc string) (trash bool, err error) {
-	log.Debugf("rados: isTrash")
+	log.Debugf("rados: isTrash loc=%s", loc)
 	trash_bytes := make([]byte, 1)
 	n, err := v.ioctx.GetXattr(loc, RadosXattrTrash, trash_bytes)
 	err = v.translateError(err)
 	v.stats.Tick(&v.stats.Ops, &v.stats.GetXattrOps)
 	v.stats.TickErr(err)
 	if err != nil {
+		log.Debugf("rados: isTrash loc=%s got error from GetXattr returning trash=%v err=%v", loc, trash, err)
 		return
 	}
 	if n != 1 {
 		err = fmt.Errorf("rados: isTrash read %d bytes for %s xattr but we were expecting %d", n, RadosXattrTrash, RFC3339NanoMaxLen)
+		log.Debugf("rados: isTrash loc=%s GetXattr returned %d bytes instead of 1, returning trash=%v err=%v", loc, n, trash, err)
 		return
 	}
 	switch uint8(trash_bytes[0]) {
@@ -1232,6 +1261,7 @@ func (v *RadosVolume) isTrash(loc string) (trash bool, err error) {
 	default:
 		err = fmt.Errorf("rados: got unexpected %s xattr value %d when we were expecting either 0 or 1", RadosXattrTrash, trash_bytes[0])
 	}
+	log.Debugf("rados: isTrash loc=%s returning trash=%v err=%v", loc, trash, err)
 	return
 }
 
@@ -1302,7 +1332,10 @@ func (v *RadosVolume) isKeepBlock(s string) bool {
 
 func (v *RadosVolume) isEmptyBlock(loc string) bool {
 	log.Debugf("rados: isEmptyBlock")
-	return loc[:32] == EmptyHash
+	if len(loc) > len(EmptyHash) {
+		loc = loc[:len(EmptyHash)]
+	}
+	return loc == EmptyHash
 }
 
 func (v *RadosVolume) translateError(err error) error {

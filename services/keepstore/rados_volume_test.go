@@ -569,14 +569,17 @@ func (ioctx *radosMockIoctx) GetXattr(oid string, name string, data []byte) (n i
 	obj, ok := ioctx.objects[oid]
 	if !ok {
 		err = rados.RadosErrorNotFound
+		log.Debugf("radosmock: GetXattr oid=%s not found in ioctx.objects, returning n=%d err=%v", oid, n, err)
 		return
 	}
 	xv, ok := obj.xattrs[name]
 	if !ok {
 		err = rados.RadosErrorNotFound
+		log.Debugf("radosmock: GetXattr oid=%s found, but name=%s not in xattrs, returning n=%d err=%v", oid, n, err)
+		return
 	}
 	n = copy(data, xv)
-	log.Debugf("radosmock: GetXattr oid=%s name=%s data='%s', returning n=%d err=%v", oid, name, data, n, err)
+	log.Debugf("radosmock: GetXattr oid=%s name=%s populated data='%s', returning n=%d err=%v", oid, name, data, n, err)
 	return
 }
 
@@ -718,11 +721,13 @@ func (ioctx *radosMockIoctx) Stat(oid string) (stat rados.ObjectStat, err error)
 	obj, ok := ioctx.objects[oid]
 	if !ok {
 		err = os.ErrNotExist
+		log.Debugf("radosmock: Stat oid=%s object does not exist, returning stat=%+v err=%v", oid, stat, err)
 		return
 	}
 	stat.Size = uint64(len(obj.data))
 	// don't bother implementing stat.ModTime as we do not use it
 
+	log.Debugf("radosmock: Stat oid=%s complete, returning stat=%+v err=%v", oid, stat, err)
 	return
 }
 
@@ -779,7 +784,7 @@ func (ioctx *radosMockIoctx) Unlock(oid, name, cookie string) (res int, err erro
 }
 
 func (ioctx *radosMockIoctx) WriteFull(oid string, data []byte) (err error) {
-	log.Debugf("radosmock: WriteFull oid=%s", oid)
+	log.Debugf("radosmock: WriteFull oid=%s len(data)=%d", oid, len(data))
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -787,7 +792,14 @@ func (ioctx *radosMockIoctx) WriteFull(oid string, data []byte) (err error) {
 	if !ok {
 		ioctx.objects[oid] = newRadosStubObj([]byte{})
 	}
-	copy(obj.data, data)
+	obj.data = make([]byte, len(data))
+	n := copy(obj.data, data)
+	if n != len(data) {
+		log.Debugf("radosmock: WriteFull oid=%s len(data)=%d but copied %d bytes", oid, len(data), n)
+		err = fmt.Errorf("radosmock: WriteFull for oid=%s was expected to copy %d bytes but only copied %d", oid, len(data), n)
+		return
+	}
+	log.Debugf("radosmock: WriteFull oid=%s len(data)=%d complete, returning err=%v", oid, len(data), err)
 	return
 }
 
