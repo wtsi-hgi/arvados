@@ -25,7 +25,7 @@
 package main
 
 import (
-	"bytes"
+	//	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -219,155 +219,155 @@ func TestRadosVolumeWithGeneric(t *testing.T) {
 	})
 }
 
-func TestRadosReadonlyVolumeWithGeneric(t *testing.T) {
-	DoGenericVolumeTests(t, func(t TB) TestableVolume {
-		return NewTestableRadosVolume(t, true, radosReplication)
-	})
-}
+// func TestRadosReadonlyVolumeWithGeneric(t *testing.T) {
+// 	DoGenericVolumeTests(t, func(t TB) TestableVolume {
+// 		return NewTestableRadosVolume(t, true, radosReplication)
+// 	})
+// }
 
-func TestRadosVolumeReplication(t *testing.T) {
-	for r := 1; r <= 4; r++ {
-		v := NewTestableRadosVolume(t, false, r)
-		defer v.Teardown()
-		if n := v.Replication(); n != r {
-			t.Errorf("Got replication %d, expected %d", n, r)
-		}
-	}
-}
+// func TestRadosVolumeReplication(t *testing.T) {
+// 	for r := 1; r <= 4; r++ {
+// 		v := NewTestableRadosVolume(t, false, r)
+// 		defer v.Teardown()
+// 		if n := v.Replication(); n != r {
+// 			t.Errorf("Got replication %d, expected %d", n, r)
+// 		}
+// 	}
+// }
 
-func TestRadosVolumeCreateBlobRace(t *testing.T) {
-	v := NewTestableRadosVolume(t, false, 3)
-	defer v.Teardown()
+// func TestRadosVolumeCreateBlobRace(t *testing.T) {
+// 	v := NewTestableRadosVolume(t, false, 3)
+// 	defer v.Teardown()
 
-	var wg sync.WaitGroup
+// 	var wg sync.WaitGroup
 
-	v.radosStubBackend.race = make(chan chan struct{})
+// 	v.radosStubBackend.race = make(chan chan struct{})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err := v.Put(context.Background(), TestHash, TestBlock)
-		if err != nil {
-			t.Error(err)
-		}
-	}()
-	continuePut := make(chan struct{})
-	// Wait for the stub's Put to create the empty blob
-	v.radosStubBackend.race <- continuePut
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, len(TestBlock))
-		_, err := v.Get(context.Background(), TestHash, buf)
-		if err != nil {
-			t.Error(err)
-		}
-	}()
-	// Wait for the stub's Get to get the empty blob
-	close(v.radosStubBackend.race)
-	// Allow stub's Put to continue, so the real data is ready
-	// when the volume's Get retries
-	<-continuePut
-	// Wait for Get() and Put() to finish
-	wg.Wait()
-}
+// 	wg.Add(1)
+// 	go func() {
+// 		defer wg.Done()
+// 		err := v.Put(context.Background(), TestHash, TestBlock)
+// 		if err != nil {
+// 			t.Error(err)
+// 		}
+// 	}()
+// 	continuePut := make(chan struct{})
+// 	// Wait for the stub's Put to create the empty blob
+// 	v.radosStubBackend.race <- continuePut
+// 	wg.Add(1)
+// 	go func() {
+// 		defer wg.Done()
+// 		buf := make([]byte, len(TestBlock))
+// 		_, err := v.Get(context.Background(), TestHash, buf)
+// 		if err != nil {
+// 			t.Error(err)
+// 		}
+// 	}()
+// 	// Wait for the stub's Get to get the empty blob
+// 	close(v.radosStubBackend.race)
+// 	// Allow stub's Put to continue, so the real data is ready
+// 	// when the volume's Get retries
+// 	<-continuePut
+// 	// Wait for Get() and Put() to finish
+// 	wg.Wait()
+// }
 
-func TestRadosVolumeCreateBlobRaceDeadline(t *testing.T) {
-	v := NewTestableRadosVolume(t, false, 3)
-	defer v.Teardown()
+// func TestRadosVolumeCreateBlobRaceDeadline(t *testing.T) {
+// 	v := NewTestableRadosVolume(t, false, 3)
+// 	defer v.Teardown()
 
-	v.PutRaw(TestHash, nil)
+// 	v.PutRaw(TestHash, nil)
 
-	buf := new(bytes.Buffer)
-	v.IndexTo("", buf)
-	if buf.Len() != 0 {
-		t.Errorf("Index %+q should be empty", buf.Bytes())
-	}
+// 	buf := new(bytes.Buffer)
+// 	v.IndexTo("", buf)
+// 	if buf.Len() != 0 {
+// 		t.Errorf("Index %+q should be empty", buf.Bytes())
+// 	}
 
-	v.TouchWithDate(TestHash, time.Now().Add(-1982*time.Millisecond))
+// 	v.TouchWithDate(TestHash, time.Now().Add(-1982*time.Millisecond))
 
-	allDone := make(chan struct{})
-	go func() {
-		defer close(allDone)
-		buf := make([]byte, BlockSize)
-		n, err := v.Get(context.Background(), TestHash, buf)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		if n != 0 {
-			t.Errorf("Got %+q, expected empty buf", buf[:n])
-		}
-	}()
-	select {
-	case <-allDone:
-	case <-time.After(time.Second):
-		t.Error("Get should have stopped waiting for race when block was 2s old")
-	}
+// 	allDone := make(chan struct{})
+// 	go func() {
+// 		defer close(allDone)
+// 		buf := make([]byte, BlockSize)
+// 		n, err := v.Get(context.Background(), TestHash, buf)
+// 		if err != nil {
+// 			t.Error(err)
+// 			return
+// 		}
+// 		if n != 0 {
+// 			t.Errorf("Got %+q, expected empty buf", buf[:n])
+// 		}
+// 	}()
+// 	select {
+// 	case <-allDone:
+// 	case <-time.After(time.Second):
+// 		t.Error("Get should have stopped waiting for race when block was 2s old")
+// 	}
 
-	buf.Reset()
-	v.IndexTo("", buf)
-	if !bytes.HasPrefix(buf.Bytes(), []byte(TestHash+"+0")) {
-		t.Errorf("Index %+q should have %+q", buf.Bytes(), TestHash+"+0")
-	}
-}
+// 	buf.Reset()
+// 	v.IndexTo("", buf)
+// 	if !bytes.HasPrefix(buf.Bytes(), []byte(TestHash+"+0")) {
+// 		t.Errorf("Index %+q should have %+q", buf.Bytes(), TestHash+"+0")
+// 	}
+// }
 
-func TestRadosVolumeContextCancelGet(t *testing.T) {
-	testRadosVolumeContextCancel(t, func(ctx context.Context, v *TestableRadosVolume) error {
-		v.PutRaw(TestHash, TestBlock)
-		_, err := v.Get(ctx, TestHash, make([]byte, BlockSize))
-		return err
-	})
-}
+// func TestRadosVolumeContextCancelGet(t *testing.T) {
+// 	testRadosVolumeContextCancel(t, func(ctx context.Context, v *TestableRadosVolume) error {
+// 		v.PutRaw(TestHash, TestBlock)
+// 		_, err := v.Get(ctx, TestHash, make([]byte, BlockSize))
+// 		return err
+// 	})
+// }
 
-func TestRadosVolumeContextCancelPut(t *testing.T) {
-	testRadosVolumeContextCancel(t, func(ctx context.Context, v *TestableRadosVolume) error {
-		return v.Put(ctx, TestHash, make([]byte, BlockSize))
-	})
-}
+// func TestRadosVolumeContextCancelPut(t *testing.T) {
+// 	testRadosVolumeContextCancel(t, func(ctx context.Context, v *TestableRadosVolume) error {
+// 		return v.Put(ctx, TestHash, make([]byte, BlockSize))
+// 	})
+// }
 
-func TestRadosVolumeContextCancelCompare(t *testing.T) {
-	testRadosVolumeContextCancel(t, func(ctx context.Context, v *TestableRadosVolume) error {
-		v.PutRaw(TestHash, TestBlock)
-		return v.Compare(ctx, TestHash, TestBlock2)
-	})
-}
+// func TestRadosVolumeContextCancelCompare(t *testing.T) {
+// 	testRadosVolumeContextCancel(t, func(ctx context.Context, v *TestableRadosVolume) error {
+// 		v.PutRaw(TestHash, TestBlock)
+// 		return v.Compare(ctx, TestHash, TestBlock2)
+// 	})
+// }
 
-func testRadosVolumeContextCancel(t *testing.T, testFunc func(context.Context, *TestableRadosVolume) error) {
-	v := NewTestableRadosVolume(t, false, 3)
-	defer v.Teardown()
-	v.radosStubBackend.race = make(chan chan struct{})
+// func testRadosVolumeContextCancel(t *testing.T, testFunc func(context.Context, *TestableRadosVolume) error) {
+// 	v := NewTestableRadosVolume(t, false, 3)
+// 	defer v.Teardown()
+// 	v.radosStubBackend.race = make(chan chan struct{})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	allDone := make(chan struct{})
-	go func() {
-		defer close(allDone)
-		err := testFunc(ctx, v)
-		if err != context.Canceled {
-			t.Errorf("got %T %q, expected %q", err, err, context.Canceled)
-		}
-	}()
-	releaseHandler := make(chan struct{})
-	select {
-	case <-allDone:
-		t.Error("testFunc finished without waiting for v.radosStubBackend.race")
-	case <-time.After(10 * time.Second):
-		t.Error("timed out waiting to enter handler")
-	case v.radosStubBackend.race <- releaseHandler:
-	}
+// 	ctx, cancel := context.WithCancel(context.Background())
+// 	allDone := make(chan struct{})
+// 	go func() {
+// 		defer close(allDone)
+// 		err := testFunc(ctx, v)
+// 		if err != context.Canceled {
+// 			t.Errorf("got %T %q, expected %q", err, err, context.Canceled)
+// 		}
+// 	}()
+// 	releaseHandler := make(chan struct{})
+// 	select {
+// 	case <-allDone:
+// 		t.Error("testFunc finished without waiting for v.radosStubBackend.race")
+// 	case <-time.After(10 * time.Second):
+// 		t.Error("timed out waiting to enter handler")
+// 	case v.radosStubBackend.race <- releaseHandler:
+// 	}
 
-	cancel()
+// 	cancel()
 
-	select {
-	case <-time.After(10 * time.Second):
-		t.Error("timed out waiting to cancel")
-	case <-allDone:
-	}
+// 	select {
+// 	case <-time.After(10 * time.Second):
+// 		t.Error("timed out waiting to cancel")
+// 	case <-allDone:
+// 	}
 
-	go func() {
-		<-releaseHandler
-	}()
-}
+// 	go func() {
+// 		<-releaseHandler
+// 	}()
+// }
 
 func (s *StubbedRadosSuite) TestStats(c *check.C) {
 	stats := func() string {
