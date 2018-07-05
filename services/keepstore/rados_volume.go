@@ -1023,6 +1023,7 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 	// attempt to obtain lock repeatedly, unless ctx.Done() occurs, in which case abandon attempt to lock
 	go func() {
 		locked := false
+	LoopUntilLocked:
 		for !locked {
 			select {
 			case <-ctx.Done():
@@ -1065,10 +1066,10 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 							err = v.delete(loc)
 							if err != nil {
 								theConfig.debugLogf("rados: failed to delete object '%s' created by attempt to lock: %v", loc, err)
-								break
+								break LoopUntilLocked
 							}
 							err = os.ErrNotExist
-							break
+							break LoopUntilLocked
 						}
 					}
 					locked = true
