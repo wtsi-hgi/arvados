@@ -45,17 +45,23 @@ import (
 )
 
 var (
-	radosPool         string
-	radosKeyringFile  string
-	radosMonHost      string
-	radosCluster      string
-	radosUser         string
-	radosReplication  int
-	radosIndexWorkers int
+	radosPool            string
+	radosKeyringFile     string
+	radosMonHost         string
+	radosCluster         string
+	radosUser            string
+	radosReplication     int
+	radosIndexWorkers    int
+	radosReadTimeout     time.Duration
+	radosWriteTimeout    time.Duration
+	radosMetadataTimeout time.Duration
 )
 
 var (
-	RadosZeroTime time.Time
+	RadosZeroTime           time.Time
+	RadosMinReadTimeout     arvados.Duration
+	RadosMinWriteTimeout    arvados.Duration
+	RadosMinMetadataTimeout arvados.Duration
 )
 
 const (
@@ -98,6 +104,9 @@ func (s *radosVolumeAdder) Set(poolName string) error {
 		Cluster:          radosCluster,
 		User:             radosUser,
 		RadosReplication: radosReplication,
+		ReadTimeout:      arvados.Duration(radosReadTimeout),
+		WriteTimeout:     arvados.Duration(radosWriteTimeout),
+		MetadataTimeout:  arvados.Duration(radosMetadataTimeout),
 	})
 	return nil
 }
@@ -138,7 +147,25 @@ func init() {
 		"rados-index-workers",
 		64,
 		"Number of worker goroutines to use for gathering object size/mtime for index")
+	flag.DurationVar(
+		&radosReadTimeout,
+		"rados-read-timeout",
+		60*time.Minute,
+		"Timeout for read operations.")
+	flag.DurationVar(
+		&radosWriteTimeout,
+		"rados-write-timeout",
+		60*time.Minute,
+		"Timeout for write operations.")
+	flag.DurationVar(
+		&radosMetadataTimeout,
+		"rados-metadata-timeout",
+		1*time.Minute,
+		"Timeout for metadata operations.")
 
+	RadosMinReadTimeout = arvados.Duration(1 * time.Second)
+	RadosMinWriteTimeout = arvados.Duration(1 * time.Second)
+	RadosMinMetadataTimeout = arvados.Duration(1 * time.Second)
 }
 
 // Define our own minimal interface types for rados so we can mock them
@@ -227,6 +254,18 @@ func (v *RadosVolume) Start() error {
 
 	if v.User == "" {
 		v.User = "client.admin"
+	}
+
+	if v.ReadTimeout < RadosMinReadTimeout {
+		v.ReadTimeout = RadosMinReadTimeout
+	}
+
+	if v.WriteTimeout < RadosMinWriteTimeout {
+		v.WriteTimeout = RadosMinWriteTimeout
+	}
+
+	if v.MetadataTimeout < RadosMinMetadataTimeout {
+		v.MetadataTimeout = RadosMinMetadataTimeout
 	}
 
 	if v.rados == nil {
