@@ -65,18 +65,19 @@ var (
 )
 
 const (
-	RFC3339NanoMaxLen        = 36
-	RadosLockNotFound        = -2
-	RadosLockBusy            = -16
-	RadosLockExist           = -17
-	RadosLockLocked          = 0
-	RadosLockUnlocked        = 0
-	RadosLockData            = "keep_lock_data"
-	RadosLockTouch           = "keep_lock_touch"
-	RadosXattrMtime          = "keep_mtime"
-	RadosXattrTrash          = "keep_trash"
-	RadosKeepNamespace       = "keep"
-	DefaultRadosIndexWorkers = 64
+	RFC3339NanoMaxLen             = 36
+	RadosLockNotFound             = -2
+	RadosLockBusy                 = -16
+	RadosLockExist                = -17
+	RadosLockLocked               = 0
+	RadosLockUnlocked             = 0
+	RadosLockData                 = "keep_lock_data"
+	RadosLockTouch                = "keep_lock_touch"
+	RadosXattrMtime               = "keep_mtime"
+	RadosXattrTrash               = "keep_trash"
+	RadosKeepNamespace            = "keep"
+	DefaultRadosIndexWorkers      = 64
+	DefaultRadosEmptyTrashWorkers = 1
 )
 
 type radosVolumeAdder struct {
@@ -915,12 +916,6 @@ func (v *RadosVolume) Trash(loc string) (err error) {
 		return
 	}
 
-	// update mtime so that the time it was trashed is recorded
-	// N.B. don't call Touch because Touch doesn't touch trash
-	ttime := time.Now()
-	log.Debugf("rados: Trash loc=%s marked as trash, setting ttime=%s", loc, ttime)
-	err = v.setMtime(loc, ttime)
-
 	log.Debugf("rados: Trash loc=%s complete, returning err=%v", loc, err)
 	return
 }
@@ -951,7 +946,7 @@ func (v *RadosVolume) Untrash(loc string) (err error) {
 // implementation-specific volume identifier (e.g., "mount
 // point" for a UnixVolume).
 func (v *RadosVolume) Status() (vs *VolumeStatus) {
-	log.Debugf("rados: Status")
+	log.Debugf("rados: Status()")
 	vs = &VolumeStatus{
 		MountPoint: fmt.Sprintf("%s", v),
 		DeviceNum:  1,
@@ -962,14 +957,17 @@ func (v *RadosVolume) Status() (vs *VolumeStatus) {
 	if err != nil {
 		log.Printf("rados: %s: failed to get cluster stats, Status will not report BytesFree correctly: %v", v, err)
 	} else {
+		log.Debugf("rados: Status() has cluster stats %+v", cs)
 		vs.BytesFree = cs.Kb_avail * 1024
 	}
 	ps, err := v.ioctx.GetPoolStats()
 	if err != nil {
 		log.Printf("rados: %s: failed to get pool stats, Status will not report BytesUsed correctly: %v", v, err)
 	} else {
+		log.Debugf("rados: Status() has pool stats %+v", ps)
 		vs.BytesUsed = ps.Num_bytes
 	}
+	log.Debugf("rados: Status() completed, returning vs=%+v", vs)
 	return
 }
 
@@ -1070,11 +1068,12 @@ func (v *RadosVolume) EmptyTrash() {
 	// empty reduce function
 	reduceFunc := func(le listEntry) {}
 
-	if theConfig.EmptyTrashWorkers <= 0 {
-		log.Errorf("rados error: cannot EmptyTrash with %d EmptyTrashWorkers", theConfig.EmptyTrashWorkers)
-		return
+	workers := theConfig.EmptyTrashWorkers
+	if workers <= 0 {
+		workers = DefaultRadosEmptyTrashWorkers
+		log.Warn("rados: cannot EmptyTrash with %d EmptyTrashWorkers, using %d instead", theConfig.EmptyTrashWorkers, workers)
 	}
-	err := v.listObjects(filterFunc, mapFunc, reduceFunc, theConfig.EmptyTrashWorkers)
+	err := v.listObjects(filterFunc, mapFunc, reduceFunc, workers)
 	if err != nil {
 		log.Printf("rados error: %s: EmptyTrash: listObjects failed: %s", v, err)
 		return
