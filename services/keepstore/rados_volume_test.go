@@ -415,18 +415,19 @@ type radosMockImpl struct {
 }
 
 func (r *radosMockImpl) Version() (major int, minor int, patch int) {
-	log.Debugf("radosmock: Version")
+	log.Debugf("radosmock: Version() calling rados.Version()")
 	// might as well pass this along to the actual librados client
 	return rados.Version()
 }
 
 func (r *radosMockImpl) NewConnWithClusterAndUser(clusterName string, userName string) (conn radosConn, err error) {
-	log.Debugf("radosmock: NewConnWithClusterAndUser")
+	log.Debugf("radosmock: NewConnWithClusterAndUser clusterName=%s userName=%s", clusterName, userName)
 	conn = &radosMockConn{
 		radosMockImpl: r,
 		cluster:       clusterName,
 		user:          userName,
 	}
+	log.Debugf("radosmock: NewConnWithClusterAndUser clusterName=%s userName=%s complete, returning conn=%+v err=%v", clusterName, userName, conn, err)
 	return
 }
 
@@ -438,16 +439,17 @@ type radosMockConn struct {
 }
 
 func (conn *radosMockConn) SetConfigOption(option, value string) (err error) {
-	log.Debugf("radosmock: SetConfigOption")
+	log.Debugf("radosmock: conn.SetConfigOption option=%s value=%s")
 	conn.b.Lock()
 	defer conn.b.Unlock()
 
 	conn.b.config[option] = value
+	log.Debugf("radosmock: conn.SetConfigOption option=%s value=%s complete, returning err=%v", err)
 	return
 }
 
 func (conn *radosMockConn) Connect() (err error) {
-	log.Debugf("radosmock: Connect")
+	log.Debugf("radosmock: conn.Connect()")
 	conn.b.Lock()
 	defer conn.b.Unlock()
 
@@ -456,11 +458,12 @@ func (conn *radosMockConn) Connect() (err error) {
 	for _, pool := range RadosMockPools {
 		conn.b.pools[pool] = newRadosStubPool()
 	}
+	log.Debugf("radosmock: conn.Connect() complete, returning err=%v", err)
 	return
 }
 
 func (conn *radosMockConn) GetFSID() (fsid string, err error) {
-	log.Debugf("radosmock: GetFSID")
+	log.Debugf("radosmock: conn.GetFSID()")
 	conn.b.Lock()
 	defer conn.b.Unlock()
 
@@ -468,11 +471,12 @@ func (conn *radosMockConn) GetFSID() (fsid string, err error) {
 	if !conn.connected {
 		err = fmt.Errorf("radosmock: GetFSID called before Connect")
 	}
+	log.Debugf("radosmock: conn.GetFSID() complete, returning fsid=%s err=%v", fsid, err)
 	return
 }
 
 func (conn *radosMockConn) GetClusterStats() (stat rados.ClusterStat, err error) {
-	log.Debugf("radosmock: GetClusterStats")
+	log.Debugf("radosmock: conn.GetClusterStats()")
 	conn.b.Lock()
 	defer conn.b.Unlock()
 
@@ -490,11 +494,12 @@ func (conn *radosMockConn) GetClusterStats() (stat rados.ClusterStat, err error)
 		}
 	}
 	stat.Kb_avail = stat.Kb - stat.Kb_used
+	log.Debugf("radosmock: conn.GetClusterStats() complete, returning stat=%+v err=%v", stat, err)
 	return
 }
 
 func (conn *radosMockConn) ListPools() (names []string, err error) {
-	log.Debugf("radosmock: ListPools")
+	log.Debugf("radosmock: conn.ListPools()")
 	conn.b.Lock()
 	defer conn.b.Unlock()
 
@@ -507,17 +512,19 @@ func (conn *radosMockConn) ListPools() (names []string, err error) {
 	if !conn.connected {
 		err = fmt.Errorf("radosmock: ListPools called before Connect")
 	}
+	log.Debugf("radosmock: conn.ListPools() complete, returning names=%v err=%v", names, err)
 	return
 }
 
 func (conn *radosMockConn) OpenIOContext(pool string) (ioctx radosIOContext, err error) {
-	log.Debugf("radosmock: OpenIOContext")
+	log.Debugf("radosmock: conn.OpenIOContext pool=%s", pool)
 	ioctx = &radosMockIoctx{
 		radosMockConn: conn,
 		pool:          pool,
 	}
 	ioctx.SetNamespace("")
 
+	log.Debugf("radosmock: conn.OpenIOContext pool=%s complete, returning ioctx=%+v err=%v", pool, ioctx, err)
 	return
 }
 
@@ -529,7 +536,7 @@ type radosMockIoctx struct {
 }
 
 func (ioctx *radosMockIoctx) Delete(oid string) (err error) {
-	log.Debugf("radosmock: Delete oid=%s", oid)
+	log.Debugf("radosmock: ioctx.Delete oid=%s", oid)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -539,11 +546,12 @@ func (ioctx *radosMockIoctx) Delete(oid string) (err error) {
 		return
 	}
 	delete(ioctx.objects, oid)
+	log.Debugf("radosmock: ioctx.Delete oid=%s complete, returning err=%v", oid, err)
 	return
 }
 
 func (ioctx *radosMockIoctx) GetPoolStats() (stat rados.PoolStat, err error) {
-	log.Debugf("radosmock: GetPoolStats")
+	log.Debugf("radosmock: ioctx.GetPoolStats()")
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -558,33 +566,34 @@ func (ioctx *radosMockIoctx) GetPoolStats() (stat rados.PoolStat, err error) {
 	stat.Num_kb = stat.Num_bytes / 1024
 	stat.Num_object_clones = stat.Num_objects * ioctx.b.numReplicas
 
+	log.Debugf("radosmock: ioctx.GetPoolStats() complete, returning stat=%+v err=%v", stat, err)
 	return
 }
 
 func (ioctx *radosMockIoctx) GetXattr(oid string, name string, data []byte) (n int, err error) {
-	log.Debugf("radosmock: GetXattr oid=%s name=%s len(data)=%d", oid, name, len(data))
+	log.Debugf("radosmock: ioctx.GetXattr oid=%s name=%s len(data)=%d", oid, name, len(data))
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
 	obj, ok := ioctx.objects[oid]
 	if !ok {
 		err = rados.RadosErrorNotFound
-		log.Debugf("radosmock: GetXattr oid=%s not found in ioctx.objects, returning n=%d err=%v", oid, n, err)
+		log.Debugf("radosmock: ioctx.GetXattr oid=%s name=%s len(data)=%d object not found in ioctx.objects, returning n=%d err=%v", oid, name, len(data), n, err)
 		return
 	}
 	xv, ok := obj.xattrs[name]
 	if !ok {
 		err = rados.RadosErrorNotFound
-		log.Debugf("radosmock: GetXattr oid=%s found, but name=%s not in xattrs, returning n=%d err=%v", oid, n, err)
+		log.Debugf("radosmock: ioctx.GetXattr oid=%s name=%s len(data)=%d object found but name not in xattrs, returning n=%d err=%v", oid, name, len(data), n, err)
 		return
 	}
 	n = copy(data, xv)
-	log.Debugf("radosmock: GetXattr oid=%s name=%s populated data='%s', returning n=%d err=%v", oid, name, data, n, err)
+	log.Debugf("radosmock: ioctx.GetXattr oid=%s name=%s len(data)=%d populated data='%s', returning n=%d err=%v", oid, name, len(data), data, n, err)
 	return
 }
 
 func (ioctx *radosMockIoctx) Iter() (iter radosIter, err error) {
-	log.Debugf("radosmock: Iter")
+	log.Debugf("radosmock: ioctx.Iter()")
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -599,16 +608,16 @@ func (ioctx *radosMockIoctx) Iter() (iter radosIter, err error) {
 		oids:           oids,
 		current:        -1,
 	}
+	log.Debugf("radosmock: ioctx.Iter() complete, returning iter=%+v err=%v", iter, err)
 	return
 }
 
 func (ioctx *radosMockIoctx) LockExclusive(oid, name, cookie, desc string, duration time.Duration, flags *byte) (res int, err error) {
-	log.Debugf("radosmock: LockExclusive oid=%s name=%s cookie=%s", oid, name, cookie)
 	return ioctx.lock(oid, name, cookie, true)
 }
 
 func (ioctx *radosMockIoctx) lock(oid, name, cookie string, exclusive bool) (res int, err error) {
-	log.Debugf("radosmock: lock")
+	log.Debugf("radosmock: ioctx.lock oid=%s name=%s cookie=%s exclusive=%v", oid, name, cookie, exclusive)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -620,6 +629,7 @@ func (ioctx *radosMockIoctx) lock(oid, name, cookie string, exclusive bool) (res
 	obj, ok := ioctx.objects[oid]
 	if !ok {
 		err = fmt.Errorf("radosmock: failed to create nonexistant object for lock")
+		log.Debugf("radosmock: ioctx.lock oid=%s name=%s cookie=%s exclusive=%v failed to create object, returning err=%v", oid, name, cookie, exclusive, err)
 		return
 	}
 
@@ -630,6 +640,7 @@ func (ioctx *radosMockIoctx) lock(oid, name, cookie string, exclusive bool) (res
 		} else {
 			res = RadosLockBusy
 		}
+		log.Debugf("radosmock: ioctx.lock oid=%s name=%s cookie=%s exclusive=%v exclusive lock already held, returning err=%v", oid, name, cookie, exclusive, err)
 		return
 	}
 
@@ -649,6 +660,7 @@ func (ioctx *radosMockIoctx) lock(oid, name, cookie string, exclusive bool) (res
 				res = RadosLockLocked
 			}
 		}
+		log.Debugf("radosmock: ioctx.lock oid=%s name=%s cookie=%s exclusive=%v shared lock already held, returning err=%v", oid, name, cookie, exclusive, err)
 		return
 	}
 
@@ -660,16 +672,16 @@ func (ioctx *radosMockIoctx) lock(oid, name, cookie string, exclusive bool) (res
 		obj.sharedLocks[name][cookie] = true
 	}
 	res = RadosLockLocked
+	log.Debugf("radosmock: ioctx.lock oid=%s name=%s cookie=%s exclusive=%v no existing lock, lock obtained, returning err=%v", oid, name, cookie, exclusive, err)
 	return
 }
 
 func (ioctx *radosMockIoctx) LockShared(oid, name, cookie, tag, desc string, duration time.Duration, flags *byte) (res int, err error) {
-	log.Debugf("radosmock: LockShared oid=%s name=%s cookie=%s", oid, name, cookie)
 	return ioctx.lock(oid, name, cookie, false)
 }
 
 func (ioctx *radosMockIoctx) Read(oid string, data []byte, offset uint64) (n int, err error) {
-	log.Debugf("radosmock: Read")
+	log.Debugf("radosmock: ioctx.Read oid=%s len(data)=%d offset=%d", oid, data, offset)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -678,12 +690,13 @@ func (ioctx *radosMockIoctx) Read(oid string, data []byte, offset uint64) (n int
 		err = os.ErrNotExist
 		return
 	}
-	n = copy(data, obj.data)
+	n = copy(data, obj.data[offset:])
+	log.Debugf("radosmock: ioctx.Read oid=%s len(data)=%d offset=%d complete, returning n=%d err=%v", oid, data, offset, n, err)
 	return
 }
 
 func (ioctx *radosMockIoctx) SetNamespace(namespace string) {
-	log.Debugf("radosmock: SetNamespace namespace=%s", namespace)
+	log.Debugf("radosmock: ioctx.SetNamespace namespace=%s", namespace)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -694,11 +707,12 @@ func (ioctx *radosMockIoctx) SetNamespace(namespace string) {
 	}
 	ns, _ := ioctx.b.pools[ioctx.pool].namespaces[ioctx.namespace]
 	ioctx.objects = ns.objects
+	log.Debugf("radosmock: ioctx.SetNamespace namespace=%s complete, returning", namespace)
 	return
 }
 
 func (ioctx *radosMockIoctx) SetXattr(oid string, name string, data []byte) (err error) {
-	log.Debugf("radosmock: SetXattr oid=%s name=%s len(data)=%d data='%s'", oid, name, len(data), data)
+	log.Debugf("radosmock: ioctx.SetXattr oid=%s name=%s len(data)=%d data='%s'", oid, name, len(data), data)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -710,11 +724,12 @@ func (ioctx *radosMockIoctx) SetXattr(oid string, name string, data []byte) (err
 	d := make([]byte, len(data))
 	copy(d, data)
 	obj.xattrs[name] = d
+	log.Debugf("radosmock: ioctx.SetXattr oid=%s name=%s len(data)=%d data='%s' complete, returning err=%v", oid, name, len(data), data, err)
 	return
 }
 
 func (ioctx *radosMockIoctx) Stat(oid string) (stat rados.ObjectStat, err error) {
-	log.Debugf("radosmock: Stat oid=%s", oid)
+	log.Debugf("radosmock: ioctx.Stat oid=%s", oid)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -727,12 +742,12 @@ func (ioctx *radosMockIoctx) Stat(oid string) (stat rados.ObjectStat, err error)
 	stat.Size = uint64(len(obj.data))
 	// don't bother implementing stat.ModTime as we do not use it
 
-	log.Debugf("radosmock: Stat oid=%s complete, returning stat=%+v err=%v", oid, stat, err)
+	log.Debugf("radosmock: ioctx.Stat oid=%s complete, returning stat=%+v err=%v", oid, stat, err)
 	return
 }
 
 func (ioctx *radosMockIoctx) Unlock(oid, name, cookie string) (res int, err error) {
-	log.Debugf("radosmock: Unlock oid=%s name=%s cookie=%s", oid, name, cookie)
+	log.Debugf("radosmock: ioctx.Unlock oid=%s name=%s cookie=%s", oid, name, cookie)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -746,14 +761,12 @@ func (ioctx *radosMockIoctx) Unlock(oid, name, cookie string) (res int, err erro
 	if exclusiveLockHeld {
 		if existingCookie == cookie {
 			// this is our lock, delete it
-			log.Debugf("radosmock: Unlock deleting exclusive lock %s with cookie %s", name, cookie)
 			delete(obj.exclusiveLocks, name)
 			res = RadosLockUnlocked
 		} else {
-			log.Debugf("radosmock: Unlock found existing exclusive lock %s with cookie '%s' rather than the provided cookie '%s'", name, existingCookie, cookie)
 			res = RadosLockNotFound
 		}
-		log.Debugf("radosmock: Unlock returning res=%v err=%v", res, err)
+		log.Debugf("radosmock: ioctx.Unlock oid=%s name=%s cookie=%s, returning res=%v err=%v", oid, name, cookie, res, err)
 		return
 	}
 
@@ -762,29 +775,26 @@ func (ioctx *radosMockIoctx) Unlock(oid, name, cookie string) (res int, err erro
 		_, sharedLockExist := existingCookieMap[cookie]
 		if sharedLockExist {
 			// this is our cookie, delete it from the cookie map
-			log.Debugf("radosmock: Unlock deleting shared lock %s with cookie %s", name, cookie)
 			delete(existingCookieMap, cookie)
 			if len(existingCookieMap) == 0 {
 				// this was the last shared cookie, delete the sharedLocks entry as well
-				log.Debugf("radosmock: Unlock has no more shared locks for %s, deleting it", name)
 				delete(obj.sharedLocks, name)
 			}
 			res = RadosLockUnlocked
 		} else {
-			log.Debugf("radosmock: Unlock found existing shared lock(s) %s but none matched the provided cookie '%s'", name, cookie)
 			res = RadosLockNotFound
 		}
-		log.Debugf("radosmock: Unlock returning res=%v err=%v", res, err)
+		log.Debugf("radosmock: ioctx.Unlock oid=%s name=%s cookie=%s found existing shared lock(s) but none matched the provided cookie, returning res=%v err=%v", oid, name, cookie, res, err)
 		return
 	}
 
 	res = RadosLockNotFound
-	log.Debugf("radosmock: Unlock returning res=%v err=%v", res, err)
+	log.Debugf("radosmock: ioctx.Unlock oid=%s name=%s cookie=%s no lock found to unlock, returning res=%v err=%v", oid, name, cookie, res, err)
 	return
 }
 
 func (ioctx *radosMockIoctx) WriteFull(oid string, data []byte) (err error) {
-	log.Debugf("radosmock: WriteFull oid=%s len(data)=%d", oid, len(data))
+	log.Debugf("radosmock: ioctx.WriteFull oid=%s len(data)=%d", oid, len(data))
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -795,11 +805,9 @@ func (ioctx *radosMockIoctx) WriteFull(oid string, data []byte) (err error) {
 	obj.data = make([]byte, len(data))
 	n := copy(obj.data, data)
 	if n != len(data) {
-		log.Debugf("radosmock: WriteFull oid=%s len(data)=%d but copied %d bytes", oid, len(data), n)
 		err = fmt.Errorf("radosmock: WriteFull for oid=%s was expected to copy %d bytes but only copied %d", oid, len(data), n)
-		return
 	}
-	log.Debugf("radosmock: WriteFull oid=%s len(data)=%d complete, returning err=%v", oid, len(data), err)
+	log.Debugf("radosmock: ioctx.WriteFull oid=%s len(data)=%d complete, returning err=%v", oid, len(data), err)
 	return
 }
 
@@ -809,25 +817,27 @@ type radosMockIter struct {
 	current int
 }
 
-func (iter *radosMockIter) Next() bool {
-	log.Debugf("radosmock: Next")
+func (iter *radosMockIter) Next() (next bool) {
+	log.Debugf("radosmock: iter.Next()")
 	iter.current++
 	if iter.current >= len(iter.oids) {
-		return false
+		next = false
 	}
-	return true
+	next = true
+	log.Debugf("radosmock: iter.Next() returning next=%v", next)
+	return
 }
 
-func (iter *radosMockIter) Value() string {
-	log.Debugf("radosmock: Value")
+func (iter *radosMockIter) Value() (value string) {
+	log.Debugf("radosmock: iter.Value()")
 	if iter.current >= 0 && iter.current < len(iter.oids) {
-		return iter.oids[iter.current]
-	} else {
-		return ""
+		value = iter.oids[iter.current]
 	}
+	log.Debugf("radosmock: iter.Value() returning value=%s", value)
+	return
 }
 
 func (iter *radosMockIter) Close() {
-	log.Debugf("radosmock: CloseClose")
+	log.Debugf("radosmock: iter.Close()")
 	return
 }
