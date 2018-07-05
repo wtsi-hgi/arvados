@@ -139,11 +139,12 @@ type TestableRadosVolume struct {
 
 func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRadosVolume {
 	var v *RadosVolume
+	radosTracef("rados test: NewTestableRadosVolume readonly=%v replication=%d", readonly, replication)
 	radosStubBackend := newRadosStubBackend(uint64(replication))
 	pool := radosTestPool
 	if pool == "" {
 		// Connect using mock radosImplementation instead of real Ceph
-		log.Infof("rados: using mock radosImplementation")
+		log.Infof("rados test: using mock radosImplementation")
 		radosMock := &radosMockImpl{
 			b: radosStubBackend,
 		}
@@ -156,7 +157,7 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 		}
 	} else {
 		// Connect to real Ceph using the real radosImplementation
-		log.Infof("rados: using real radosImplementation")
+		log.Infof("rados test: using real radosImplementation")
 		v = &RadosVolume{
 			Pool:             pool,
 			KeyringFile:      radosKeyringFile,
