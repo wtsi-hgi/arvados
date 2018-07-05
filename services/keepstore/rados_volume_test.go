@@ -427,11 +427,13 @@ type radosMockImpl struct {
 }
 
 func (r *radosMockImpl) Version() (major int, minor int, patch int) {
+	log.Debugf("radosmock: Version")
 	// might as well pass this along to the actual librados client
 	return rados.Version()
 }
 
 func (r *radosMockImpl) NewConnWithClusterAndUser(clusterName string, userName string) (conn radosConn, err error) {
+	log.Debugf("radosmock: NewConnWithClusterAndUser")
 	conn = &radosMockConn{
 		radosMockImpl: r,
 		cluster:       clusterName,
@@ -448,6 +450,7 @@ type radosMockConn struct {
 }
 
 func (conn *radosMockConn) SetConfigOption(option, value string) (err error) {
+	log.Debugf("radosmock: SetConfigOption")
 	conn.b.Lock()
 	defer conn.b.Unlock()
 
@@ -456,6 +459,7 @@ func (conn *radosMockConn) SetConfigOption(option, value string) (err error) {
 }
 
 func (conn *radosMockConn) Connect() (err error) {
+	log.Debugf("radosmock: Connect")
 	conn.b.Lock()
 	defer conn.b.Unlock()
 
@@ -468,6 +472,7 @@ func (conn *radosMockConn) Connect() (err error) {
 }
 
 func (conn *radosMockConn) GetFSID() (fsid string, err error) {
+	log.Debugf("radosmock: GetFSID")
 	conn.b.Lock()
 	defer conn.b.Unlock()
 
@@ -479,6 +484,7 @@ func (conn *radosMockConn) GetFSID() (fsid string, err error) {
 }
 
 func (conn *radosMockConn) GetClusterStats() (stat rados.ClusterStat, err error) {
+	log.Debugf("radosmock: GetClusterStats")
 	conn.b.Lock()
 	defer conn.b.Unlock()
 
@@ -500,6 +506,7 @@ func (conn *radosMockConn) GetClusterStats() (stat rados.ClusterStat, err error)
 }
 
 func (conn *radosMockConn) ListPools() (names []string, err error) {
+	log.Debugf("radosmock: ListPools")
 	conn.b.Lock()
 	defer conn.b.Unlock()
 
@@ -516,6 +523,7 @@ func (conn *radosMockConn) ListPools() (names []string, err error) {
 }
 
 func (conn *radosMockConn) OpenIOContext(pool string) (ioctx radosIOContext, err error) {
+	log.Debugf("radosmock: OpenIOContext")
 	ioctx = &radosMockIoctx{
 		radosMockConn: conn,
 		pool:          pool,
@@ -533,6 +541,7 @@ type radosMockIoctx struct {
 }
 
 func (ioctx *radosMockIoctx) Delete(oid string) (err error) {
+	log.Debugf("radosmock: Delete oid=%s", oid)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -546,6 +555,7 @@ func (ioctx *radosMockIoctx) Delete(oid string) (err error) {
 }
 
 func (ioctx *radosMockIoctx) GetPoolStats() (stat rados.PoolStat, err error) {
+	log.Debugf("radosmock: GetPoolStats")
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -564,6 +574,7 @@ func (ioctx *radosMockIoctx) GetPoolStats() (stat rados.PoolStat, err error) {
 }
 
 func (ioctx *radosMockIoctx) GetXattr(oid string, name string, data []byte) (n int, err error) {
+	log.Debugf("radosmock: GetXattr oid=%s name=%s", oid, name)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -581,6 +592,7 @@ func (ioctx *radosMockIoctx) GetXattr(oid string, name string, data []byte) (n i
 }
 
 func (ioctx *radosMockIoctx) Iter() (iter radosIter, err error) {
+	log.Debugf("radosmock: Iter")
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -599,10 +611,12 @@ func (ioctx *radosMockIoctx) Iter() (iter radosIter, err error) {
 }
 
 func (ioctx *radosMockIoctx) LockExclusive(oid, name, cookie, desc string, duration time.Duration, flags *byte) (res int, err error) {
+	log.Debugf("radosmock: LockExclusive oid=%s name=%s cookie=%s", oid, name, cookie)
 	return ioctx.lock(oid, name, cookie, true)
 }
 
 func (ioctx *radosMockIoctx) lock(oid, name, cookie string, exclusive bool) (res int, err error) {
+	log.Debugf("radosmock: lock")
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -658,10 +672,12 @@ func (ioctx *radosMockIoctx) lock(oid, name, cookie string, exclusive bool) (res
 }
 
 func (ioctx *radosMockIoctx) LockShared(oid, name, cookie, tag, desc string, duration time.Duration, flags *byte) (res int, err error) {
+	log.Debugf("radosmock: LockShared oid=%s name=%s cookie=%s", oid, name, cookie)
 	return ioctx.lock(oid, name, cookie, false)
 }
 
 func (ioctx *radosMockIoctx) Read(oid string, data []byte, offset uint64) (n int, err error) {
+	log.Debugf("radosmock: Read")
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -675,6 +691,7 @@ func (ioctx *radosMockIoctx) Read(oid string, data []byte, offset uint64) (n int
 }
 
 func (ioctx *radosMockIoctx) SetNamespace(namespace string) {
+	log.Debugf("radosmock: SetNamespace namespace=%s", namespace)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -689,6 +706,7 @@ func (ioctx *radosMockIoctx) SetNamespace(namespace string) {
 }
 
 func (ioctx *radosMockIoctx) SetXattr(oid string, name string, data []byte) (err error) {
+	log.Debugf("radosmock: SetXattr oid=%s name=%s", oid, name)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -702,6 +720,7 @@ func (ioctx *radosMockIoctx) SetXattr(oid string, name string, data []byte) (err
 }
 
 func (ioctx *radosMockIoctx) Stat(oid string) (stat rados.ObjectStat, err error) {
+	log.Debugf("radosmock: Stat oid=%s", oid)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -717,6 +736,7 @@ func (ioctx *radosMockIoctx) Stat(oid string) (stat rados.ObjectStat, err error)
 }
 
 func (ioctx *radosMockIoctx) Unlock(oid, name, cookie string) (res int, err error) {
+	log.Debugf("radosmock: Unlock oid=%s name=%s cookie=%s", oid, name, cookie)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -730,11 +750,14 @@ func (ioctx *radosMockIoctx) Unlock(oid, name, cookie string) (res int, err erro
 	if exclusiveLockHeld {
 		if existingCookie == cookie {
 			// this is our lock, delete it
+			log.Debugf("radosmock: Unlock deleting exclusive lock %s with cookie %s", name, cookie)
 			delete(obj.exclusiveLocks, name)
 			res = RadosLockUnlocked
 		} else {
+			log.Debugf("radosmock: Unlock found existing exclusive lock %s with cookie '%s' rather than the provided cookie '%s'", name, existingCookie, cookie)
 			res = RadosLockNotFound
 		}
+		log.Debugf("radosmock: Unlock returning res=%v err=%v", res, err)
 		return
 	}
 
@@ -743,23 +766,29 @@ func (ioctx *radosMockIoctx) Unlock(oid, name, cookie string) (res int, err erro
 		_, sharedLockExist := existingCookieMap[cookie]
 		if sharedLockExist {
 			// this is our cookie, delete it from the cookie map
+			log.Debugf("radosmock: Unlock deleting shared lock %s with cookie %s", name, cookie)
 			delete(existingCookieMap, cookie)
 			if len(existingCookieMap) == 0 {
 				// this was the last shared cookie, delete the sharedLocks entry as well
+				log.Debugf("radosmock: Unlock has no more shared locks for %s, deleting it", name)
 				delete(obj.sharedLocks, name)
 			}
 			res = RadosLockUnlocked
 		} else {
+			log.Debugf("radosmock: Unlock found existing shared lock(s) %s but none matched the provided cookie '%s'", name, cookie)
 			res = RadosLockNotFound
 		}
+		log.Debugf("radosmock: Unlock returning res=%v err=%v", res, err)
 		return
 	}
 
 	res = RadosLockNotFound
+	log.Debugf("radosmock: Unlock returning res=%v err=%v", res, err)
 	return
 }
 
 func (ioctx *radosMockIoctx) WriteFull(oid string, data []byte) (err error) {
+	log.Debugf("radosmock: WriteFull oid=%s", oid)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -778,6 +807,7 @@ type radosMockIter struct {
 }
 
 func (iter *radosMockIter) Next() bool {
+	log.Debugf("radosmock: Next")
 	iter.current++
 	if iter.current >= len(iter.oids) {
 		return false
@@ -786,6 +816,7 @@ func (iter *radosMockIter) Next() bool {
 }
 
 func (iter *radosMockIter) Value() string {
+	log.Debugf("radosmock: Value")
 	if iter.current >= 0 && iter.current < len(iter.oids) {
 		return iter.oids[iter.current]
 	} else {
@@ -794,5 +825,6 @@ func (iter *radosMockIter) Value() string {
 }
 
 func (iter *radosMockIter) Close() {
+	log.Debugf("radosmock: CloseClose")
 	return
 }
