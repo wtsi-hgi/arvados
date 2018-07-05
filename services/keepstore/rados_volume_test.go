@@ -681,7 +681,7 @@ func (ioctx *radosMockIoctx) LockShared(oid, name, cookie, tag, desc string, dur
 }
 
 func (ioctx *radosMockIoctx) Read(oid string, data []byte, offset uint64) (n int, err error) {
-	log.Debugf("radosmock: ioctx.Read oid=%s len(data)=%d offset=%d", oid, data, offset)
+	log.Debugf("radosmock: ioctx.Read oid=%s len(data)=%d offset=%d", oid, len(data), offset)
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
@@ -691,7 +691,7 @@ func (ioctx *radosMockIoctx) Read(oid string, data []byte, offset uint64) (n int
 		return
 	}
 	n = copy(data, obj.data[offset:])
-	log.Debugf("radosmock: ioctx.Read oid=%s len(data)=%d offset=%d complete, returning n=%d err=%v", oid, data, offset, n, err)
+	log.Debugf("radosmock: ioctx.Read oid=%s len(data)=%d offset=%d complete, returning n=%d err=%v", oid, len(data), offset, n, err)
 	return
 }
 
