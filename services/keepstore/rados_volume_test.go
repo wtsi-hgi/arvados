@@ -402,9 +402,15 @@ func (v *TestableRadosVolume) PutRaw(locator string, data []byte) {
 	}
 }
 
-func (v *TestableRadosVolume) TouchWithDate(locator string, lastPut time.Time) {
-	log.Debugf("radostest: TouchWithDate touching %s with date %v", locator, lastPut)
-	v.setMtime(locator, lastPut)
+func (v *TestableRadosVolume) TouchWithDate(loc string, mtime time.Time) {
+	log.Debugf("radostest: TouchWithDate loc=%s mtime=%v", loc, mtime)
+	err := v.setMtime(loc, mtime)
+	if err != nil {
+		log.Debugf("radostest: TouchWithDate loc=%s mtime=%v setMtime returned err=%v", loc, mtime, err)
+		v.t.Fatalf("TouchWithDate failed to set mtime for block %s", loc)
+	}
+	log.Debugf("radostest: TouchWithDate loc=%s mtime=%v completed, returning.", loc, mtime)
+	return
 }
 
 func (v *TestableRadosVolume) Teardown() {}
@@ -736,13 +742,45 @@ func (ioctx *radosMockIoctx) Stat(oid string) (stat rados.ObjectStat, err error)
 	obj, ok := ioctx.objects[oid]
 	if !ok {
 		err = os.ErrNotExist
-		log.Debugf("radosmock: Stat oid=%s object does not exist, returning stat=%+v err=%v", oid, stat, err)
+		log.Debugf("radosmock: ioctx.Stat oid=%s object does not exist, returning stat=%+v err=%v", oid, stat, err)
 		return
 	}
 	stat.Size = uint64(len(obj.data))
 	// don't bother implementing stat.ModTime as we do not use it
 
 	log.Debugf("radosmock: ioctx.Stat oid=%s complete, returning stat=%+v err=%v", oid, stat, err)
+	return
+}
+
+func (ioctx *radosMockIoctx) Truncate(oid string, size uint64) (err error) {
+	log.Debugf("radosmock: ioctx.Truncate oid=%s size=%d", oid, size)
+	ioctx.b.Lock()
+	defer ioctx.b.Unlock()
+
+	obj, ok := ioctx.objects[oid]
+	if !ok {
+		err = os.ErrNotExist
+		log.Debugf("radosmock: ioctx.Truncate oid=%s size=%d object not found, returning err=%v", oid, size, err)
+		return
+	}
+
+	if uint64(len(obj.data)) < size {
+		// existing data is smaller than truncation size, pad it with zeros
+		d := make([]byte, size)
+		copy(d, obj.data[:])
+		obj.data = d
+		log.Debugf("radosmock: ioctx.Truncate oid=%s size=%d enlarged object from %d bytes by padding with zeros", oid, size, len(obj.data))
+	}
+
+	if uint64(len(obj.data)) > size {
+		// existing data is larger than truncation size
+		d := make([]byte, size)
+		copy(d, obj.data[:size])
+		obj.data = d
+		log.Debugf("radosmock: ioctx.Truncate oid=%s size=%d shrunk object from %d bytes", oid, size, len(obj.data))
+	}
+
+	log.Debugf("radosmock: ioctx.Truncate oid=%s size=%d complete, returning err=%v", oid, size, err)
 	return
 }
 

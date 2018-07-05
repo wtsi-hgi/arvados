@@ -65,17 +65,18 @@ var (
 )
 
 const (
-	RFC3339NanoMaxLen  = 36
-	RadosLockNotFound  = -2
-	RadosLockBusy      = -16
-	RadosLockExist     = -17
-	RadosLockLocked    = 0
-	RadosLockUnlocked  = 0
-	RadosLockData      = "keep_lock_data"
-	RadosLockTouch     = "keep_lock_touch"
-	RadosXattrMtime    = "keep_mtime"
-	RadosXattrTrash    = "keep_trash"
-	RadosKeepNamespace = "keep"
+	RFC3339NanoMaxLen        = 36
+	RadosLockNotFound        = -2
+	RadosLockBusy            = -16
+	RadosLockExist           = -17
+	RadosLockLocked          = 0
+	RadosLockUnlocked        = 0
+	RadosLockData            = "keep_lock_data"
+	RadosLockTouch           = "keep_lock_touch"
+	RadosXattrMtime          = "keep_mtime"
+	RadosXattrTrash          = "keep_trash"
+	RadosKeepNamespace       = "keep"
+	DefaultRadosIndexWorkers = 64
 )
 
 type radosVolumeAdder struct {
@@ -98,15 +99,16 @@ func (s *radosVolumeAdder) Set(poolName string) error {
 		log.Print("Notice: -serialize is not supported by rados-pool volumes.")
 	}
 	s.Config.Volumes = append(s.Config.Volumes, &RadosVolume{
-		Pool:             poolName,
-		KeyringFile:      radosKeyringFile,
-		MonHost:          radosMonHost,
-		Cluster:          radosCluster,
-		User:             radosUser,
-		RadosReplication: radosReplication,
-		ReadTimeout:      arvados.Duration(radosReadTimeout),
-		WriteTimeout:     arvados.Duration(radosWriteTimeout),
-		MetadataTimeout:  arvados.Duration(radosMetadataTimeout),
+		Pool:              poolName,
+		KeyringFile:       radosKeyringFile,
+		MonHost:           radosMonHost,
+		Cluster:           radosCluster,
+		User:              radosUser,
+		RadosReplication:  radosReplication,
+		ReadTimeout:       arvados.Duration(radosReadTimeout),
+		WriteTimeout:      arvados.Duration(radosWriteTimeout),
+		MetadataTimeout:   arvados.Duration(radosMetadataTimeout),
+		RadosIndexWorkers: radosIndexWorkers,
 	})
 	return nil
 }
@@ -145,7 +147,7 @@ func init() {
 	flag.IntVar(
 		&radosIndexWorkers,
 		"rados-index-workers",
-		64,
+		DefaultRadosIndexWorkers,
 		"Number of worker goroutines to use for gathering object size/mtime for index")
 	flag.DurationVar(
 		&radosReadTimeout,
@@ -186,14 +188,15 @@ type radosConn interface {
 type radosIOContext interface {
 	Delete(oid string) error
 	GetPoolStats() (stat rados.PoolStat, err error)
-	GetXattr(object string, name string, data []byte) (int, error)
+	GetXattr(oid string, name string, data []byte) (int, error)
 	Iter() (radosIter, error)
 	LockExclusive(oid, name, cookie, desc string, duration time.Duration, flags *byte) (int, error)
 	LockShared(oid, name, cookie, tag, desc string, duration time.Duration, flags *byte) (int, error)
 	Read(oid string, data []byte, offset uint64) (int, error)
 	SetNamespace(namespace string)
-	SetXattr(object string, name string, data []byte) error
-	Stat(object string) (stat rados.ObjectStat, err error)
+	SetXattr(oid string, name string, data []byte) error
+	Stat(oid string) (stat rados.ObjectStat, err error)
+	Truncate(oid string, size uint64) error
 	Unlock(oid, name, cookie string) (int, error)
 	WriteFull(oid string, data []byte) error
 }
@@ -206,20 +209,20 @@ type radosIter interface {
 
 // RadosVolume implements Volume using an Rados pool.
 type RadosVolume struct {
-	Pool             string
-	KeyringFile      string
-	MonHost          string
-	Cluster          string
-	User             string
-	FSID             string
-	Debug            bool
-	RadosReplication int
-
-	ReadTimeout     arvados.Duration
-	WriteTimeout    arvados.Duration
-	MetadataTimeout arvados.Duration
-	ReadOnly        bool
-	StorageClasses  []string
+	Pool              string
+	KeyringFile       string
+	MonHost           string
+	Cluster           string
+	User              string
+	FSID              string
+	Debug             bool
+	RadosReplication  int
+	RadosIndexWorkers int
+	ReadTimeout       arvados.Duration
+	WriteTimeout      arvados.Duration
+	MetadataTimeout   arvados.Duration
+	ReadOnly          bool
+	StorageClasses    []string
 
 	rados radosImplementation
 	conn  radosConn
@@ -258,15 +261,23 @@ func (v *RadosVolume) Start() error {
 	}
 
 	if v.ReadTimeout < RadosMinReadTimeout {
+		log.Infof("rados: ReadTimeout of %v is below minimum, setting it to %v", v.ReadTimeout, RadosMinReadTimeout)
 		v.ReadTimeout = RadosMinReadTimeout
 	}
 
 	if v.WriteTimeout < RadosMinWriteTimeout {
+		log.Infof("rados: WriteTimeout of %v is below minimum, setting it to %v", v.WriteTimeout, RadosMinWriteTimeout)
 		v.WriteTimeout = RadosMinWriteTimeout
 	}
 
 	if v.MetadataTimeout < RadosMinMetadataTimeout {
+		log.Infof("rados: MetadataTimeout of %v is below minimum, setting it to %v", v.MetadataTimeout, RadosMinMetadataTimeout)
 		v.MetadataTimeout = RadosMinMetadataTimeout
+	}
+
+	if v.RadosIndexWorkers <= 0 {
+		log.Infof("rados: cannot work with %d RadosIndexWorkers, will set it to default of %d", v.RadosIndexWorkers, DefaultRadosIndexWorkers)
+		v.RadosIndexWorkers = DefaultRadosIndexWorkers
 	}
 
 	if v.rados == nil {
@@ -390,6 +401,18 @@ func (v *RadosVolume) Start() error {
 // len(buf) will not exceed BlockSize.
 func (v *RadosVolume) Get(ctx context.Context, loc string, buf []byte) (n int, err error) {
 	log.Debugf("rados: Get loc=%s len(buf)=%d", loc, len(buf))
+
+	isTrash, err := v.isTrash(loc)
+	err = v.translateError(err)
+	if err != nil {
+		log.Debugf("rados: Get loc=%s len(buf)=%d isTrash failed, returning n=%d err=%v", loc, len(buf), n, err)
+		return
+	}
+	if isTrash {
+		err = os.ErrNotExist
+		log.Debugf("rados: Get loc=%s len(buf)=%d object exists but is trash, returning n=%d err=%v", loc, len(buf), n, err)
+		return
+	}
 
 	size, err := v.size(loc)
 	if err != nil {
@@ -567,9 +590,18 @@ func (v *RadosVolume) Put(ctx context.Context, loc string, block []byte) (err er
 		return
 	}()
 
+	// If the block is empty, we need to truncate it to ensure that any existing data is removed
+	if len(block) == 0 {
+		err = v.ioctx.Truncate(loc, 0)
+		if err != nil {
+			log.Debugf("rados: Put loc=%s len(block)=%d failed to truncate empty block, returning err=%v", loc, len(block), err)
+			return
+		}
+	}
+
 	// Only write non-empty blocks (as some versions of go-ceph have a problem writing empty buffers)
 	// Note that the lock will have already created an empty object so the write is already done.
-	if !v.isEmptyBlock(loc) {
+	if len(block) > 0 {
 		err = v.ioctx.WriteFull(loc, block)
 		err = v.translateError(err)
 		v.stats.Tick(&v.stats.Ops, &v.stats.PutOps)
@@ -773,7 +805,7 @@ func (v *RadosVolume) IndexTo(prefix string, writer io.Writer) (err error) {
 	reduceFunc := func(le listEntry) {
 		fmt.Fprintf(writer, "%s\n", le)
 	}
-	err = v.listObjects(filterFunc, mapFunc, reduceFunc, radosIndexWorkers)
+	err = v.listObjects(filterFunc, mapFunc, reduceFunc, v.RadosIndexWorkers)
 	return
 }
 
@@ -808,8 +840,9 @@ func (v *RadosVolume) IndexTo(prefix string, writer io.Writer) (err error) {
 // will not be trashed for at least BlobSignatureTTL
 // seconds.
 func (v *RadosVolume) Trash(loc string) (err error) {
-	log.Debugf("rados: Trash")
+	log.Debugf("rados: Trash loc=%s", loc)
 	if v.ReadOnly {
+		log.Debugf("rados: Trash loc=%s volume is read-only, returning err=%v", loc, err)
 		return MethodDisabledError
 	}
 
@@ -820,10 +853,12 @@ func (v *RadosVolume) Trash(loc string) (err error) {
 	// locks in the same order.
 	dataLockCookie, err := v.lockExclusive(ctx, loc, RadosLockData, "Trash", v.MetadataTimeout, false)
 	if err != nil {
+		log.Debugf("rados: Trash loc=%s failed to obtain data lock, returning err=%v", loc, err)
 		return
 	}
-	mtimeLockCookie, err := v.lockExclusive(ctx, loc, RadosLockTouch, "Trash", v.MetadataTimeout, false)
+	touchLockCookie, err := v.lockExclusive(ctx, loc, RadosLockTouch, "Trash", v.MetadataTimeout, false)
 	if err != nil {
+		log.Debugf("rados: Trash loc=%s failed to obtain touch lock, returning err=%v", loc, err)
 		return
 	}
 	defer func() {
@@ -831,9 +866,9 @@ func (v *RadosVolume) Trash(loc string) (err error) {
 		if err == nil && dataLockErr != nil {
 			err = dataLockErr
 		}
-		mtimeLockErr := v.unlock(loc, RadosLockTouch, mtimeLockCookie)
-		if err == nil && mtimeLockErr != nil {
-			err = mtimeLockErr
+		touchLockErr := v.unlock(loc, RadosLockTouch, touchLockCookie)
+		if err == nil && touchLockErr != nil {
+			err = touchLockErr
 		}
 		return
 	}()
@@ -841,57 +876,73 @@ func (v *RadosVolume) Trash(loc string) (err error) {
 	// check if this object is already trash
 	isTrash, err := v.isTrash(loc)
 	if err != nil {
+		log.Debugf("rados: Trash loc=%s isTrash failed, returning err=%v", loc, err)
 		return
 	}
 	if isTrash {
 		err = fmt.Errorf("rados: attempt to Trash object '%s' that is already trash", loc)
+		log.Debugf("rados: Trash loc=%s object is already trash, returning err=%v", loc, err)
 		return
 	}
 
 	// check mtime and mark as trash if needed
-	t, err := v.Mtime(loc)
+	mtime, err := v.Mtime(loc)
 	if err != nil {
+		log.Debugf("rados: Trash loc=%s failed to get mtime, returning err=%v", loc, err)
 		return
 	}
-	if time.Since(t) < theConfig.BlobSignatureTTL.Duration() {
+	now := time.Now()
+	//age := time.Since(mtime)
+	age := now.Sub(mtime)
+
+	if age < theConfig.BlobSignatureTTL.Duration() {
 		err = nil
+		log.Debugf("rados: Trash loc=%s object age=%s now=%s mtime=%s is younger than BlobSignatureTTL=%s - not trashing it, returning err=%v", loc, age, now, mtime, theConfig.BlobSignatureTTL.Duration(), err)
 		return
 	}
+
 	if theConfig.TrashLifetime == 0 {
-		// trash lifetime is zero, just immediately delete the block
+		// trash lifetime is zero, just immediately delete the block without bothering with trash
 		err = v.delete(loc)
+		log.Debugf("rados: Trash loc=%s failed to delete, returning err=%v", loc, err)
 		return
 	}
 
 	// mark as trash
 	err = v.markTrash(loc)
 	if err != nil {
+		log.Debugf("rados: Trash loc=%s failed to mark as trash, returning err=%v", loc, err)
 		return
 	}
 
 	// update mtime so that the time it was trashed is recorded
 	// N.B. don't call Touch because Touch doesn't touch trash
 	ttime := time.Now()
+	log.Debugf("rados: Trash loc=%s marked as trash, setting ttime=%s", loc, ttime)
 	err = v.setMtime(loc, ttime)
 
+	log.Debugf("rados: Trash loc=%s complete, returning err=%v", loc, err)
 	return
 }
 
 // Untrash moves block from trash back into store
 func (v *RadosVolume) Untrash(loc string) (err error) {
-	log.Debugf("rados: Untrash")
+	log.Debugf("rados: Untrash loc=%s")
 	// check if this object is, in fact, trash
 	isTrash, err := v.isTrash(loc)
 	if err != nil {
+		log.Debugf("rados: Untrash loc=%s failed to check if object is trash, returning err=%v", err)
 		return
 	}
 	if !isTrash {
-		err = fmt.Errorf("rados: attempt to Untrash object '%s' that is not trash", loc)
+		err = os.ErrNotExist
+		log.Debugf("rados: Untrash loc=%s object exists but is not trash, returning err=%v", err)
 		return
 	}
 
 	// mark as not trash
 	err = v.markNotTrash(loc)
+	log.Debugf("rados: Untrash loc=%s completed, returning err=%v", err)
 	return
 }
 
@@ -954,7 +1005,7 @@ func (v *RadosVolume) Replication() int {
 // EmptyTrash looks for trashed blocks that exceeded TrashLifetime
 // and deletes them from the volume.
 func (v *RadosVolume) EmptyTrash() {
-	log.Debugf("rados: EmptyTrash")
+	log.Debugf("rados: EmptyTrash()")
 	var bytesInTrash, blocksInTrash, bytesDeleted, blocksDeleted int64
 
 	// Define "ready to delete" as "...when EmptyTrash started".
@@ -997,7 +1048,7 @@ func (v *RadosVolume) EmptyTrash() {
 		// actually delete the object
 		err = v.delete(loc)
 		if err != nil {
-			log.Printf("rados warning: %s: EmptyTrash failed to delete %s: %v", v, loc, err)
+			log.Warn("rados: %s: EmptyTrash failed to delete %s: %v", v, loc, err)
 			return
 		}
 		atomic.AddInt64(&bytesDeleted, int64(size))
@@ -1019,12 +1070,19 @@ func (v *RadosVolume) EmptyTrash() {
 	// empty reduce function
 	reduceFunc := func(le listEntry) {}
 
+	if theConfig.EmptyTrashWorkers <= 0 {
+		log.Errorf("rados error: cannot EmptyTrash with %d EmptyTrashWorkers", theConfig.EmptyTrashWorkers)
+		return
+	}
 	err := v.listObjects(filterFunc, mapFunc, reduceFunc, theConfig.EmptyTrashWorkers)
 	if err != nil {
 		log.Printf("rados error: %s: EmptyTrash: listObjects failed: %s", v, err)
+		return
 	}
 
-	log.Printf("EmptyTrash stats for %v: Deleted %v bytes in %v blocks. Remaining in trash: %v bytes in %v blocks.", v.String(), bytesDeleted, blocksDeleted, bytesInTrash-bytesDeleted, blocksInTrash-blocksDeleted)
+	log.Printf("rados: EmptyTrash stats for %v: Deleted %v bytes in %v blocks. Remaining in trash: %v bytes in %v blocks.", v.String(), bytesDeleted, blocksDeleted, bytesInTrash-bytesDeleted, blocksInTrash-blocksDeleted)
+	log.Debugf("rados: EmptyTrash() finished, returning")
+	return
 }
 
 // Return a globally unique ID of the underlying storage
@@ -1267,7 +1325,7 @@ func (v *RadosVolume) isTrash(loc string) (trash bool, err error) {
 
 // markTrash marks an object as trash.
 func (v *RadosVolume) markTrash(loc string) (err error) {
-	log.Debugf("rados: markTrash")
+	log.Debugf("rados: markTrash loc=%s", loc)
 	err = v.ioctx.SetXattr(loc, RadosXattrTrash, []byte{uint8(1)})
 
 	err = v.translateError(err)
@@ -1276,12 +1334,13 @@ func (v *RadosVolume) markTrash(loc string) (err error) {
 	if err != nil {
 		err = fmt.Errorf("rados: markTrash failed to update %s xattr for loc '%s': %v", RadosXattrTrash, loc, err)
 	}
+	log.Debugf("rados: markTrash loc=%s complete, returning err=%v", loc, err)
 	return
 }
 
 // markNotTrash ensures that the object is not marked as trash
 func (v *RadosVolume) markNotTrash(loc string) (err error) {
-	log.Debugf("rados: markNotTrash")
+	log.Debugf("rados: markNotTrash loc=%s", loc)
 	err = v.ioctx.SetXattr(loc, RadosXattrTrash, []byte{uint8(0)})
 	err = v.translateError(err)
 	v.stats.Tick(&v.stats.Ops, &v.stats.SetXattrOps)
@@ -1289,12 +1348,13 @@ func (v *RadosVolume) markNotTrash(loc string) (err error) {
 	if err != nil {
 		err = fmt.Errorf("rados: markNotTrash failed to update %s xattr for loc '%s': %v", RadosXattrTrash, loc, err)
 	}
+	log.Debugf("rados: markNotTrash loc=%s complete, returning err=%v", loc, err)
 	return
 }
 
 // setMtime sets the mtime xattr to the given time
 func (v *RadosVolume) setMtime(loc string, mtime time.Time) (err error) {
-	log.Debugf("rados: setMtime")
+	log.Debugf("rados: setMtime loc=%s mtime=%s", loc, mtime)
 	mtime_string := mtime.Format(time.RFC3339Nano)
 	mtime_bytes := []byte(fmt.Sprintf("%[1]*[2]s", RFC3339NanoMaxLen, mtime_string))
 	err = v.ioctx.SetXattr(loc, RadosXattrMtime, mtime_bytes)
@@ -1304,6 +1364,7 @@ func (v *RadosVolume) setMtime(loc string, mtime time.Time) (err error) {
 		err = fmt.Errorf("rados: failed to update %s xattr for loc '%s': %v", RadosXattrMtime, loc, err)
 	}
 	v.stats.TickErr(err)
+	log.Debugf("rados: setMtime loc=%s mtime=%s complete, returning err=%v", loc, mtime, err)
 	return
 }
 
@@ -1328,14 +1389,6 @@ var radosKeepBlockRegexp = regexp.MustCompile(`^[0-9a-f]{32}$`)
 func (v *RadosVolume) isKeepBlock(s string) bool {
 	log.Debugf("rados: isKeepBlock")
 	return radosKeepBlockRegexp.MatchString(s)
-}
-
-func (v *RadosVolume) isEmptyBlock(loc string) bool {
-	log.Debugf("rados: isEmptyBlock")
-	if len(loc) > len(EmptyHash) {
-		loc = loc[:len(EmptyHash)]
-	}
-	return loc == EmptyHash
 }
 
 func (v *RadosVolume) translateError(err error) error {
