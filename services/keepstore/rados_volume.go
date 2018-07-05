@@ -59,16 +59,17 @@ var (
 )
 
 const (
-	RFC3339NanoMaxLen = 36
-	RadosLockNotFound = -2
-	RadosLockBusy     = -16
-	RadosLockExist    = -17
-	RadosLockLocked   = 0
-	RadosLockUnlocked = 0
-	RadosLockData     = "keep_lock_data"
-	RadosLockTouch    = "keep_lock_touch"
-	RadosXattrMtime   = "keep_mtime"
-	RadosXattrTrash   = "keep_trash"
+	RFC3339NanoMaxLen  = 36
+	RadosLockNotFound  = -2
+	RadosLockBusy      = -16
+	RadosLockExist     = -17
+	RadosLockLocked    = 0
+	RadosLockUnlocked  = 0
+	RadosLockData      = "keep_lock_data"
+	RadosLockTouch     = "keep_lock_touch"
+	RadosXattrMtime    = "keep_mtime"
+	RadosXattrTrash    = "keep_trash"
+	RadosKeepNamespace = "keep"
 )
 
 type radosVolumeAdder struct {
@@ -290,16 +291,17 @@ func (v *RadosVolume) Start() error {
 	if !stringInSlice(v.Pool, pools) {
 		return fmt.Errorf("rados: pool '%s' not present in cluster %s. available pools in this cluster are: %v", v.Pool, v.Cluster, pools)
 	}
+	theConfig.debugLogf("rados: pool '%s' was found", v.Pool)
 
 	ioctx, err := v.conn.OpenIOContext(v.Pool)
 	if err != nil {
 		return fmt.Errorf("rados: error opening IO context for pool '%s': %v", v.Pool, err)
 	}
+	theConfig.debugLogf("rados: pool '%s' was opened", v.Pool)
 
-	ioctx.SetNamespace("keep")
+	ioctx.SetNamespace(RadosKeepNamespace)
 
 	v.ioctx = ioctx
-
 	if v.RadosReplication == 0 {
 		// RadosReplication was not set or was explicitly set to 0 - determine it from the PoolStats if we can
 		v.RadosReplication = 1

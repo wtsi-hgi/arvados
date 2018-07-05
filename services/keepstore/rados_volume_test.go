@@ -29,6 +29,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -39,13 +40,14 @@ import (
 )
 
 const (
-	RadosMockTestPool    = "mocktestpool"
-	RadosMockTestMonHost = "mocktestmonhost"
-	RadosMockTotalSize   = 1 * 1024 * 1024 * 1024
-	RadosMockFSID        = "mockmock-mock-mock-mock-mockmockmock"
+	RadosMockPool      = "mocktestpool2"
+	RadosMockMonHost   = "mocktestmonhost"
+	RadosMockTotalSize = 1 * 1024 * 1024 * 1024
+	RadosMockFSID      = "mockmock-mock-mock-mock-mockmockmock"
 )
 
 var radosTestPool string
+var RadosMockPools []string
 
 func init() {
 	flag.StringVar(
@@ -53,37 +55,65 @@ func init() {
 		"test.rados-pool-volume",
 		"",
 		"Rados pool to use for testing (i.e. to test against a 'real' Ceph cluster such as a ceph/demo docker container). Do not use a pool with real data for testing! Use normal rados volume arguments (e.g. -rados-mon-host, -rados-user, -rados-keyring-file) to supply required parameters to access the pool.")
+
+	RadosMockPools = []string{"mocktestpool0", "mocktestpool1", RadosMockPool, "mocktestpool3", "mocktestpool4"}
 }
 
 type radosStubObj struct {
-	Data   []byte
-	Xattrs map[string][]byte
+	data   []byte
+	xattrs map[string][]byte
+}
+
+type radosStubNamespace struct {
+	objects map[string]*radosStubObj
+}
+
+type radosStubPool struct {
+	namespaces map[string]*radosStubNamespace
 }
 
 type radosStubBackend struct {
 	sync.Mutex
-	objects   map[string]*radosStubObj
-	config    map[string]string
-	totalSize uint64
-	fsid      string
-	race      chan chan struct{}
+	config      map[string]string
+	totalSize   uint64
+	numReplicas uint64
+	fsid        string
+	pools       map[string]*radosStubPool
+	race        chan chan struct{}
 }
 
-func newRadosStubBackend() *radosStubBackend {
+func newRadosStubBackend(numReplicas uint64) *radosStubBackend {
 	return &radosStubBackend{
-		objects:   make(map[string]*radosStubObj),
-		config:    make(map[string]string),
-		totalSize: RadosMockTotalSize,
-		fsid:      RadosMockFSID,
+		config:      make(map[string]string),
+		totalSize:   RadosMockTotalSize,
+		numReplicas: numReplicas,
+		fsid:        "00000000-0000-0000-0000-000000000000",
+		pools:       make(map[string]*radosStubPool),
 	}
 }
 
-func (h *radosStubBackend) PutRaw(oid string, data []byte) {
+func (h *radosStubBackend) PutRaw(pool string, namespace string, oid string, data []byte) {
 	h.Lock()
 	defer h.Unlock()
-	h.objects[oid] = &radosStubObj{
-		Data:   data,
-		Xattrs: make(map[string][]byte),
+	_, ok := h.pools[pool]
+	if !ok {
+		h.pools[pool] = &radosStubPool{
+			namespaces: make(map[string]*radosStubNamespace),
+		}
+	}
+	_, ok = h.pools[pool].namespaces[namespace]
+	if !ok {
+		h.pools[pool].namespaces[namespace] = &radosStubNamespace{
+			objects: make(map[string]*radosStubObj),
+		}
+	}
+
+	_, ok = h.pools[pool].namespaces[namespace].objects[oid]
+	if !ok {
+		h.pools[pool].namespaces[namespace].objects[oid] = &radosStubObj{
+			data:   data,
+			xattrs: make(map[string][]byte),
+		}
 	}
 }
 
@@ -110,7 +140,7 @@ type TestableRadosVolume struct {
 
 func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRadosVolume {
 	var v *RadosVolume
-	radosStubBackend := newRadosStubBackend()
+	radosStubBackend := newRadosStubBackend(uint64(replication))
 	pool := radosTestPool
 	if pool == "" {
 		// Connect using mock radosImplementation instead of real Ceph
@@ -119,8 +149,8 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 			b: radosStubBackend,
 		}
 		v = &RadosVolume{
-			Pool:             RadosMockTestPool,
-			MonHost:          RadosMockTestMonHost,
+			Pool:             RadosMockPool,
+			MonHost:          RadosMockMonHost,
 			ReadOnly:         readonly,
 			RadosReplication: replication,
 			rados:            radosMock,
@@ -138,13 +168,18 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 			RadosReplication: replication,
 		}
 	}
-	v.Start()
 
-	return &TestableRadosVolume{
+	tv := &TestableRadosVolume{
 		RadosVolume:      v,
 		radosStubBackend: radosStubBackend,
 		t:                t,
 	}
+
+	err := tv.Start()
+	if err != nil {
+		t.Error(err)
+	}
+	return tv
 }
 
 var _ = check.Suite(&StubbedRadosSuite{})
@@ -360,7 +395,7 @@ Volumes:
 }
 
 func (v *TestableRadosVolume) PutRaw(locator string, data []byte) {
-	v.radosStubBackend.PutRaw(locator, data)
+	v.radosStubBackend.PutRaw(v.Pool, RadosKeepNamespace, locator, data)
 }
 
 func (v *TestableRadosVolume) TouchWithDate(locator string, lastPut time.Time) {
@@ -375,7 +410,7 @@ type radosMockImpl struct {
 }
 
 func (r *radosMockImpl) Version() (major int, minor int, patch int) {
-	// might as well return the real rados Version
+	// might as well pass this along to the actual librados client
 	return rados.Version()
 }
 
@@ -390,8 +425,9 @@ func (r *radosMockImpl) NewConnWithClusterAndUser(clusterName string, userName s
 
 type radosMockConn struct {
 	*radosMockImpl
-	cluster string
-	user    string
+	cluster   string
+	user      string
+	connected bool
 }
 
 func (conn *radosMockConn) SetConfigOption(option, value string) (err error) {
@@ -400,49 +436,110 @@ func (conn *radosMockConn) SetConfigOption(option, value string) (err error) {
 }
 
 func (conn *radosMockConn) Connect() (err error) {
+	conn.connected = true
+	conn.b.fsid = RadosMockFSID
+	for _, pool := range RadosMockPools {
+		conn.b.pools[pool] = &radosStubPool{
+			namespaces: make(map[string]*radosStubNamespace),
+		}
+	}
 	return
 }
 
 func (conn *radosMockConn) GetFSID() (fsid string, err error) {
 	fsid = conn.b.fsid
+	if !conn.connected {
+		err = fmt.Errorf("radosmock: GetFSID called before Connect")
+	}
 	return
 }
 
 func (conn *radosMockConn) GetClusterStats() (stat rados.ClusterStat, err error) {
+	if !conn.connected {
+		panic("radosmock: GetClusterStats called before Connect")
+	}
 	stat.Kb = conn.b.totalSize
-	for _, obj := range conn.b.objects {
-		size := len(obj.Data)
-		stat.Kb_used += uint64(size)
-		stat.Num_objects++
+	for _, pool := range conn.b.pools {
+		for _, namespace := range pool.namespaces {
+			for _, obj := range namespace.objects {
+				size := len(obj.data)
+				stat.Kb_used += uint64(size)
+				stat.Num_objects++
+			}
+		}
 	}
 	stat.Kb_avail = stat.Kb - stat.Kb_used
 	return
 }
 
 func (conn *radosMockConn) ListPools() (names []string, err error) {
+	names = make([]string, len(conn.b.pools))
+	i := 0
+	for k := range conn.b.pools {
+		names[i] = k
+		i++
+	}
+	if !conn.connected {
+		err = fmt.Errorf("radosmock: ListPools called before Connect")
+	}
 	return
 }
 
 func (conn *radosMockConn) OpenIOContext(pool string) (ioctx radosIOContext, err error) {
 	ioctx = &radosMockIoctx{
-		conn,
+		radosMockConn: conn,
+		pool:          pool,
 	}
+	ioctx.SetNamespace("")
+
 	return
 }
 
 type radosMockIoctx struct {
 	*radosMockConn
+	pool      string
+	namespace string
+	objects   map[string]*radosStubObj
 }
 
 func (ioctx *radosMockIoctx) Delete(oid string) (err error) {
+	_, ok := ioctx.objects[oid]
+	if !ok {
+		err = rados.RadosErrorNotFound
+		return
+	}
+	delete(ioctx.objects, oid)
 	return
 }
 
 func (ioctx *radosMockIoctx) GetPoolStats() (stat rados.PoolStat, err error) {
+
+	pool := ioctx.b.pools[ioctx.pool]
+	for _, namespace := range pool.namespaces {
+		for _, obj := range namespace.objects {
+			size := len(obj.data)
+			stat.Num_bytes += uint64(size)
+			stat.Num_objects++
+		}
+	}
+	stat.Num_kb = stat.Num_bytes / 1024
+	stat.Num_object_clones = stat.Num_objects * ioctx.b.numReplicas
+
 	return
 }
 
-func (ioctx *radosMockIoctx) GetXattr(object string, name string, data []byte) (n int, err error) {
+func (ioctx *radosMockIoctx) GetXattr(oid string, name string, data []byte) (n int, err error) {
+	obj, ok := ioctx.objects[oid]
+	if !ok {
+		err = rados.RadosErrorNotFound
+		return
+	}
+	xv, ok := obj.xattrs[RadosXattrTrash]
+	if !ok {
+		err = rados.RadosErrorNotFound
+	}
+	n = len(xv)
+	copy(xv, data)
 	return
 }
 
@@ -466,14 +563,29 @@ func (ioctx *radosMockIoctx) Read(oid string, data []byte, offset uint64) (n int
 }
 
 func (ioctx *radosMockIoctx) SetNamespace(namespace string) {
+	ioctx.namespace = namespace
+	_, ok := ioctx.b.pools[ioctx.pool].namespaces[ioctx.namespace]
+	if !ok {
+		ioctx.b.pools[ioctx.pool].namespaces[ioctx.namespace] = &radosStubNamespace{
+			objects: make(map[string]*radosStubObj),
+		}
+	}
+	ns, _ := ioctx.b.pools[ioctx.pool].namespaces[ioctx.namespace]
+	ioctx.objects = ns.objects
 	return
 }
 
-func (ioctx *radosMockIoctx) SetXattr(object string, name string, data []byte) (err error) {
+func (ioctx *radosMockIoctx) SetXattr(oid string, name string, data []byte) (err error) {
+	obj, ok := ioctx.objects[oid]
+	if !ok {
+		err = rados.RadosErrorNotFound
+		return
+	}
+	obj.xattrs[name] = data
 	return
 }
 
-func (ioctx *radosMockIoctx) Stat(object string) (stat rados.ObjectStat, err error) {
+func (ioctx *radosMockIoctx) Stat(oid string) (stat rados.ObjectStat, err error) {
 	return
 }
 
