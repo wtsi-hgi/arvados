@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -60,16 +61,39 @@ func init() {
 }
 
 type radosStubObj struct {
-	data   []byte
-	xattrs map[string][]byte
+	data           []byte
+	xattrs         map[string][]byte
+	exclusiveLocks map[string]string
+	sharedLocks    map[string]map[string]bool
+}
+
+func newRadosStubObj(data []byte) *radosStubObj {
+	return &radosStubObj{
+		data:           data,
+		xattrs:         make(map[string][]byte),
+		exclusiveLocks: make(map[string]string),
+		sharedLocks:    make(map[string]map[string]bool),
+	}
 }
 
 type radosStubNamespace struct {
 	objects map[string]*radosStubObj
 }
 
+func newRadosStubNamespace() *radosStubNamespace {
+	return &radosStubNamespace{
+		objects: make(map[string]*radosStubObj),
+	}
+}
+
 type radosStubPool struct {
 	namespaces map[string]*radosStubNamespace
+}
+
+func newRadosStubPool() *radosStubPool {
+	return &radosStubPool{
+		namespaces: make(map[string]*radosStubNamespace),
+	}
 }
 
 type radosStubBackend struct {
@@ -97,23 +121,16 @@ func (h *radosStubBackend) PutRaw(pool string, namespace string, oid string, dat
 	defer h.Unlock()
 	_, ok := h.pools[pool]
 	if !ok {
-		h.pools[pool] = &radosStubPool{
-			namespaces: make(map[string]*radosStubNamespace),
-		}
+		h.pools[pool] = newRadosStubPool()
 	}
 	_, ok = h.pools[pool].namespaces[namespace]
 	if !ok {
-		h.pools[pool].namespaces[namespace] = &radosStubNamespace{
-			objects: make(map[string]*radosStubObj),
-		}
+		h.pools[pool].namespaces[namespace] = newRadosStubNamespace()
 	}
 
 	_, ok = h.pools[pool].namespaces[namespace].objects[oid]
 	if !ok {
-		h.pools[pool].namespaces[namespace].objects[oid] = &radosStubObj{
-			data:   data,
-			xattrs: make(map[string][]byte),
-		}
+		h.pools[pool].namespaces[namespace].objects[oid] = newRadosStubObj(data)
 	}
 }
 
@@ -431,22 +448,26 @@ type radosMockConn struct {
 }
 
 func (conn *radosMockConn) SetConfigOption(option, value string) (err error) {
+	conn.b.Lock()
+	defer conn.b.Unlock()
 	conn.b.config[option] = value
 	return
 }
 
 func (conn *radosMockConn) Connect() (err error) {
+	conn.b.Lock()
+	defer conn.b.Unlock()
 	conn.connected = true
 	conn.b.fsid = RadosMockFSID
 	for _, pool := range RadosMockPools {
-		conn.b.pools[pool] = &radosStubPool{
-			namespaces: make(map[string]*radosStubNamespace),
-		}
+		conn.b.pools[pool] = newRadosStubPool()
 	}
 	return
 }
 
 func (conn *radosMockConn) GetFSID() (fsid string, err error) {
+	conn.b.Lock()
+	defer conn.b.Unlock()
 	fsid = conn.b.fsid
 	if !conn.connected {
 		err = fmt.Errorf("radosmock: GetFSID called before Connect")
@@ -455,6 +476,8 @@ func (conn *radosMockConn) GetFSID() (fsid string, err error) {
 }
 
 func (conn *radosMockConn) GetClusterStats() (stat rados.ClusterStat, err error) {
+	conn.b.Lock()
+	defer conn.b.Unlock()
 	if !conn.connected {
 		panic("radosmock: GetClusterStats called before Connect")
 	}
@@ -473,6 +496,8 @@ func (conn *radosMockConn) GetClusterStats() (stat rados.ClusterStat, err error)
 }
 
 func (conn *radosMockConn) ListPools() (names []string, err error) {
+	conn.b.Lock()
+	defer conn.b.Unlock()
 	names = make([]string, len(conn.b.pools))
 	i := 0
 	for k := range conn.b.pools {
@@ -503,6 +528,8 @@ type radosMockIoctx struct {
 }
 
 func (ioctx *radosMockIoctx) Delete(oid string) (err error) {
+	ioctx.b.Lock()
+	defer ioctx.b.Unlock()
 	_, ok := ioctx.objects[oid]
 	if !ok {
 		err = rados.RadosErrorNotFound
@@ -513,6 +540,8 @@ func (ioctx *radosMockIoctx) Delete(oid string) (err error) {
 }
 
 func (ioctx *radosMockIoctx) GetPoolStats() (stat rados.PoolStat, err error) {
+	ioctx.b.Lock()
+	defer ioctx.b.Unlock()
 
 	pool := ioctx.b.pools[ioctx.pool]
 	for _, namespace := range pool.namespaces {
@@ -529,6 +558,8 @@ func (ioctx *radosMockIoctx) GetPoolStats() (stat rados.PoolStat, err error) {
 }
 
 func (ioctx *radosMockIoctx) GetXattr(oid string, name string, data []byte) (n int, err error) {
+	ioctx.b.Lock()
+	defer ioctx.b.Unlock()
 	obj, ok := ioctx.objects[oid]
 	if !ok {
 		err = rados.RadosErrorNotFound
@@ -538,12 +569,14 @@ func (ioctx *radosMockIoctx) GetXattr(oid string, name string, data []byte) (n i
 	if !ok {
 		err = rados.RadosErrorNotFound
 	}
-	n = len(xv)
-	copy(xv, data)
+	n = copy(data, xv)
 	return
 }
 
 func (ioctx *radosMockIoctx) Iter() (iter radosIter, err error) {
+	ioctx.b.Lock()
+	defer ioctx.b.Unlock()
+
 	iter = &radosMockIter{
 		radosMockIoctx: ioctx,
 	}
@@ -551,24 +584,89 @@ func (ioctx *radosMockIoctx) Iter() (iter radosIter, err error) {
 }
 
 func (ioctx *radosMockIoctx) LockExclusive(oid, name, cookie, desc string, duration time.Duration, flags *byte) (res int, err error) {
+	return ioctx.lock(oid, name, cookie, true)
+}
+
+func (ioctx *radosMockIoctx) lock(oid, name, cookie string, exclusive bool) (res int, err error) {
+	ioctx.b.Lock()
+	defer ioctx.b.Unlock()
+
+	_, ok := ioctx.objects[oid]
+	if !ok {
+		// locking a nonexistant object creates an empty object
+		ioctx.objects[oid] = newRadosStubObj([]byte{})
+	}
+	obj, ok := ioctx.objects[oid]
+	if !ok {
+		err = fmt.Errorf("radosmock: failed to create nonexistant object for lock")
+		return
+	}
+
+	existingCookie, exclusiveLockHeld := obj.exclusiveLocks[name]
+	if exclusiveLockHeld {
+		if exclusive && existingCookie == cookie {
+			res = RadosLockExist
+		} else {
+			res = RadosLockBusy
+		}
+		return
+	}
+
+	existingCookieMap, sharedLockHeld := obj.sharedLocks[name]
+	if sharedLockHeld {
+		if exclusive {
+			// want an exclusive lock but shared locks exist
+			res = RadosLockBusy
+		} else {
+			// want a shared lock
+			_, sharedLockExist := existingCookieMap[cookie]
+			if sharedLockExist {
+				res = RadosLockExist
+			} else {
+				// want a shared lock and some exist but not ours, add our cookie to the map
+				existingCookieMap[cookie] = true
+				res = RadosLockLocked
+			}
+		}
+		return
+	}
+
+	// there is no existing lock by this name on this object, take the lock
+	if exclusive {
+		obj.exclusiveLocks[name] = cookie
+	} else {
+		obj.sharedLocks[name] = make(map[string]bool)
+		obj.sharedLocks[name][cookie] = true
+	}
+	res = RadosLockLocked
 	return
 }
 
 func (ioctx *radosMockIoctx) LockShared(oid, name, cookie, tag, desc string, duration time.Duration, flags *byte) (res int, err error) {
-	return
+	return ioctx.lock(oid, name, cookie, false)
 }
 
 func (ioctx *radosMockIoctx) Read(oid string, data []byte, offset uint64) (n int, err error) {
+	ioctx.b.Lock()
+	defer ioctx.b.Unlock()
+
+	obj, ok := ioctx.objects[oid]
+	if !ok {
+		err = os.ErrNotExist
+		return
+	}
+	n = copy(data, obj.data)
 	return
 }
 
 func (ioctx *radosMockIoctx) SetNamespace(namespace string) {
+	ioctx.b.Lock()
+	defer ioctx.b.Unlock()
+
 	ioctx.namespace = namespace
 	_, ok := ioctx.b.pools[ioctx.pool].namespaces[ioctx.namespace]
 	if !ok {
-		ioctx.b.pools[ioctx.pool].namespaces[ioctx.namespace] = &radosStubNamespace{
-			objects: make(map[string]*radosStubObj),
-		}
+		ioctx.b.pools[ioctx.pool].namespaces[ioctx.namespace] = newRadosStubNamespace()
 	}
 	ns, _ := ioctx.b.pools[ioctx.pool].namespaces[ioctx.namespace]
 	ioctx.objects = ns.objects
@@ -576,6 +674,9 @@ func (ioctx *radosMockIoctx) SetNamespace(namespace string) {
 }
 
 func (ioctx *radosMockIoctx) SetXattr(oid string, name string, data []byte) (err error) {
+	ioctx.b.Lock()
+	defer ioctx.b.Unlock()
+
 	obj, ok := ioctx.objects[oid]
 	if !ok {
 		err = rados.RadosErrorNotFound
@@ -586,14 +687,74 @@ func (ioctx *radosMockIoctx) SetXattr(oid string, name string, data []byte) (err
 }
 
 func (ioctx *radosMockIoctx) Stat(oid string) (stat rados.ObjectStat, err error) {
+	ioctx.b.Lock()
+	defer ioctx.b.Unlock()
+
+	obj, ok := ioctx.objects[oid]
+	if !ok {
+		err = os.ErrNotExist
+		return
+	}
+	stat.Size = uint64(len(obj.data))
+	// don't bother implementing stat.ModTime as we do not use it
+
 	return
 }
 
 func (ioctx *radosMockIoctx) Unlock(oid, name, cookie string) (res int, err error) {
+	ioctx.b.Lock()
+	defer ioctx.b.Unlock()
+
+	obj, ok := ioctx.objects[oid]
+	if !ok {
+		res = RadosLockNotFound
+		return
+	}
+
+	existingCookie, exclusiveLockHeld := obj.exclusiveLocks[name]
+	if exclusiveLockHeld {
+		if existingCookie == cookie {
+			// this is our lock, delete it
+			delete(obj.exclusiveLocks, name)
+			res = RadosLockUnlocked
+		} else {
+			res = RadosLockNotFound
+		}
+		return
+	}
+
+	existingCookieMap, sharedLockHeld := obj.sharedLocks[name]
+	if sharedLockHeld {
+		_, sharedLockExist := existingCookieMap[cookie]
+		if sharedLockExist {
+			// this is our cookie, delete it from the cookie map
+			delete(existingCookieMap, cookie)
+			if len(existingCookieMap) == 0 {
+				// this was the last shared cookie, delete the sharedLocks entry as well
+				delete(obj.sharedLocks, name)
+			}
+			res = RadosLockUnlocked
+		} else {
+			res = RadosLockNotFound
+		}
+		return
+	}
+
+	res = RadosLockNotFound
 	return
 }
 
 func (ioctx *radosMockIoctx) WriteFull(oid string, data []byte) (err error) {
+	ioctx.b.Lock()
+	defer ioctx.b.Unlock()
+
+	obj, ok := ioctx.objects[oid]
+	if !ok {
+		ioctx.objects[oid] = newRadosStubObj(data)
+		return
+	}
+
+	obj.data = data
 	return
 }
 
