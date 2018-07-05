@@ -1401,7 +1401,7 @@ func (v *RadosVolume) newIndexListEntry(loc string) (ile *indexListEntry) {
 }
 
 func (v *RadosVolume) listObjects(filterFunc func(string) (bool, error), mapFunc func(string) listEntry, reduceFunc func(listEntry), workers int) (err error) {
-	log.Debugf("rados: listObjects")
+	log.Debugf("rados: listObjects workers=%d", workers)
 	// open object list iterator
 	iter, err := v.ioctx.Iter()
 	v.stats.Tick(&v.stats.Ops, &v.stats.ListOps)
@@ -1426,35 +1426,56 @@ func (v *RadosVolume) listObjects(filterFunc func(string) (bool, error), mapFunc
 			v.stats.Tick(&v.stats.Ops, &v.stats.ListOps)
 			loc := iter.Value()
 			if !v.isKeepBlock(loc) {
+				log.Debugf("rados: listObjects workers=%d loc=%s is not a keep block, skipping it", workers, loc)
 				continue
 			}
+			log.Debugf("rados: listObjects workers=%d calling filterFunc on loc=%s", workers, loc)
 			include, listErr := filterFunc(loc)
 			if listErr != nil {
 				break ObjectIteratorLoop
 			}
 			if include {
+				log.Debugf("rados: listObjects workers=%d filter says to include loc=%s", workers, loc)
 				listLocChan <- loc
 			}
 		}
 		listLocErrChan <- listErr
+		log.Debugf("rados: listObjects workers=%d about to close listLocErrChan", workers)
+		close(listLocErrChan)
+		log.Debugf("rados: listObjects workers=%d closed listLocErrChan", workers)
+		log.Debugf("rados: listObjects workers=%d about to close listLocChan", workers)
 		close(listLocChan)
+		log.Debugf("rados: listObjects workers=%d closed listLocChan", workers)
 		return
 	}()
 
 	// start workers to process listLocs using mapFunc
 	// and put the results on listEntryChan
+	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			for loc := range listLocChan {
+				log.Debugf("rados: listObjects workers=%d calling mapFunc on loc=%s", workers, loc)
 				le := mapFunc(loc)
+				log.Debugf("rados: listObjects workers=%d back from mapFunc loc=%s have le=%s le.Err=%v", workers, loc, le, le.Err())
 				listEntryChan <- le
 			}
+			return
 		}()
 	}
+	go func() {
+		wg.Wait()
+		log.Debugf("rados: listObjects workers=%d all listLocChan workers complete, about to close listEntryChan", workers)
+		close(listEntryChan)
+		log.Debugf("rados: listObjects workers=%d closed listEntryChan", workers)
+	}()
 
 	// process listEntry entries from listEntryChan and pass them to reduceFunc
 	// checking for errors along the way
 	for le := range listEntryChan {
+		log.Debugf("rados: listObjects workers=%d got list entry from listEntryChan le=%s le.Err=%v", workers, le, le.Err())
 		if le.Err() != nil {
 			// TODO could signal async work to stop here as we no longer
 			// need the results.
@@ -1464,15 +1485,19 @@ func (v *RadosVolume) listObjects(filterFunc func(string) (bool, error), mapFunc
 			// or we may leak goroutines.
 			continue
 		}
+		log.Debugf("rados: listObjects workers=%d calling reduceFunc on le=%s le.Err=%v", workers, le, le.Err())
 		reduceFunc(le)
+		log.Debugf("rados: listObjects workers=%d back from reduceFunc on le=%s le.Err=%v", workers, le, le.Err())
 	}
 	if err != nil {
 		// at least one of the list entries had an error
+		log.Debugf("rados: listObjects workers=%d mapping list entries failed, returning err=%v", workers, err)
 		return
 	}
 
 	// check if there was an error from the loc listing function and, if so, return it
 	err = <-listLocErrChan
+	log.Debugf("rados: listObjects workers=%d, returning err=%v", workers, err)
 	return
 }
 
