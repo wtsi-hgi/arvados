@@ -717,7 +717,7 @@ func (v *RadosVolume) exists(loc string) (exists bool, err error) {
 // Mtime must return a non-nil error if the given block is not
 // found or the timestamp could not be retrieved.
 func (v *RadosVolume) Mtime(loc string) (mtime time.Time, err error) {
-	log.Debugf("rados: Mtime")
+	log.Debugf("rados: Mtime loc=%s", loc)
 	isTrash, err := v.isTrash(loc)
 	if err != nil {
 		return
@@ -727,6 +727,20 @@ func (v *RadosVolume) Mtime(loc string) (mtime time.Time, err error) {
 		return
 	}
 
+	mtime, err = v.mtimeNoTrashCheck(loc)
+	log.Debugf("rados: Mtime loc=%s completed, returning mtime=%s err=%v", loc, mtime, err)
+	return
+}
+
+// mtimeNoTrashCheck returns the stored timestamp for the given
+// locator even if it is trash.
+//
+// loc is as described in Get.
+//
+// Mtime must return a non-nil error if the given block is not
+// found or the timestamp could not be retrieved.
+func (v *RadosVolume) mtimeNoTrashCheck(loc string) (mtime time.Time, err error) {
+	log.Debugf("rados: mtimeNoTrashCheck loc=%s", loc)
 	mtime_bytes := make([]byte, RFC3339NanoMaxLen)
 	n, err := v.ioctx.GetXattr(loc, RadosXattrMtime, mtime_bytes)
 	err = v.translateError(err)
@@ -734,20 +748,24 @@ func (v *RadosVolume) Mtime(loc string) (mtime time.Time, err error) {
 	if err != nil {
 		err = fmt.Errorf("rados: failed to get %s xattr object %v: %v", RadosXattrMtime, loc, err)
 		v.stats.TickErr(err)
+		log.Debugf("rados: mtimeNoTrashCheck loc=%s xattr read an unexpected number of bytes, returning mtime=%s err=%v", loc, mtime, err)
 		return
 	}
 	if n != RFC3339NanoMaxLen {
 		err = fmt.Errorf("rados: Mtime read %d bytes for %s xattr but we were expecting %d", n, RadosXattrMtime, RFC3339NanoMaxLen)
 		v.stats.TickErr(err)
+		log.Debugf("rados: mtimeNoTrashCheck loc=%s xattr read an unexpected number of bytes, returning mtime=%s err=%v", loc, mtime, err)
 		return
 	}
 	mtime, err = time.Parse(time.RFC3339Nano, strings.TrimSpace(string(mtime_bytes[:RFC3339NanoMaxLen])))
 	if err != nil {
 		mtime = RadosZeroTime
 		v.stats.TickErr(err)
+		log.Debugf("rados: mtimeNoTrashCheck loc=%s error parsing time from xattr, returning mtime=%s err=%v", loc, mtime, err)
 		return
 	}
 	v.stats.TickErr(err)
+	log.Debugf("rados: mtimeNoTrashCheck loc=%s completed, returning mtime=%s err=%v", loc, mtime, err)
 	return
 }
 
@@ -1021,7 +1039,7 @@ func (v *RadosVolume) EmptyTrash() {
 		atomic.AddInt64(&blocksInTrash, 1)
 		atomic.AddInt64(&bytesInTrash, int64(size))
 
-		trashT, err := v.Mtime(loc)
+		trashT, err := v.mtimeNoTrashCheck(loc)
 		if err != nil {
 			log.Printf("rados warning: %s: EmptyTrash failed to get mtime for %s: %v", v, loc, err)
 			return
