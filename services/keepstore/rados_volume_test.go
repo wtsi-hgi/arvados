@@ -196,6 +196,7 @@ func (s *StubbedRadosSuite) TearDownTest(c *check.C) {
 	s.volume.Teardown()
 }
 
+// Rados Volume Tests
 func TestRadosVolumeWithGeneric(t *testing.T) {
 	DoGenericVolumeTests(t, func(t TB) TestableVolume {
 		return NewTestableRadosVolume(t, false, radosReplication)
@@ -208,15 +209,15 @@ func TestRadosReadonlyVolumeWithGeneric(t *testing.T) {
 	})
 }
 
-// func TestRadosVolumeReplication(t *testing.T) {
-// 	for r := 1; r <= 4; r++ {
-// 		v := NewTestableRadosVolume(t, false, r)
-// 		defer v.Teardown()
-// 		if n := v.Replication(); n != r {
-// 			t.Errorf("Got replication %d, expected %d", n, r)
-// 		}
-// 	}
-// }
+func TestRadosVolumeReplication(t *testing.T) {
+	for r := 1; r <= 4; r++ {
+		v := NewTestableRadosVolume(t, false, r)
+		defer v.Teardown()
+		if n := v.Replication(); n != r {
+			t.Errorf("Got replication %d, expected %d", n, r)
+		}
+	}
+}
 
 // func TestRadosVolumeCreateBlobRace(t *testing.T) {
 // 	v := NewTestableRadosVolume(t, false, 3)
