@@ -31,13 +31,18 @@ import (
 // radosRealImpl implements the radosImplementation interface by wrapping the real go-ceph/rados
 type radosRealImpl struct{}
 
-func (r *radosRealImpl) Version() (int, int, int) {
-	return rados.Version()
+func (r *radosRealImpl) Version() (major, minor, patch int) {
+	radosTracef("rados: Version()")
+	major, minor, patch = rados.Version()
+	radosTracef("rados: Version() complete, returning major=%d minor=%d patch=%d", major, minor, patch)
+	return
 }
 
 func (r *radosRealImpl) NewConnWithClusterAndUser(clusterName string, userName string) (conn radosConn, err error) {
+	radosTracef("rados: NewConnWithClusterAndUser clusterName=%s userName=%s", clusterName, userName)
 	c, err := rados.NewConnWithClusterAndUser(clusterName, userName)
 	conn = &radosRealConn{c}
+	radosTracef("rados: NewConnWithClusterAndUser clusterName=%s userName=%s complete, returning conn=%+v err=%v", clusterName, userName, conn, err)
 	return
 }
 

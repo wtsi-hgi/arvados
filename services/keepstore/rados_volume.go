@@ -268,22 +268,22 @@ func (v *RadosVolume) Start() error {
 	}
 
 	if v.ReadTimeout < RadosMinReadTimeout {
-		log.Infof("rados: ReadTimeout of %v is below minimum, setting it to %v", v.ReadTimeout, RadosMinReadTimeout)
+		log.Warnf("rados: ReadTimeout of %v is below minimum, setting it to %v", v.ReadTimeout, RadosMinReadTimeout)
 		v.ReadTimeout = RadosMinReadTimeout
 	}
 
 	if v.WriteTimeout < RadosMinWriteTimeout {
-		log.Infof("rados: WriteTimeout of %v is below minimum, setting it to %v", v.WriteTimeout, RadosMinWriteTimeout)
+		log.Warnf("rados: WriteTimeout of %v is below minimum, setting it to %v", v.WriteTimeout, RadosMinWriteTimeout)
 		v.WriteTimeout = RadosMinWriteTimeout
 	}
 
 	if v.MetadataTimeout < RadosMinMetadataTimeout {
-		log.Infof("rados: MetadataTimeout of %v is below minimum, setting it to %v", v.MetadataTimeout, RadosMinMetadataTimeout)
+		log.Warnf("rados: MetadataTimeout of %v is below minimum, setting it to %v", v.MetadataTimeout, RadosMinMetadataTimeout)
 		v.MetadataTimeout = RadosMinMetadataTimeout
 	}
 
 	if v.RadosIndexWorkers <= 0 {
-		log.Infof("rados: cannot work with %d RadosIndexWorkers, will set it to default of %d", v.RadosIndexWorkers, DefaultRadosIndexWorkers)
+		log.Warnf("rados: cannot work with %d RadosIndexWorkers, will set it to default of %d", v.RadosIndexWorkers, DefaultRadosIndexWorkers)
 		v.RadosIndexWorkers = DefaultRadosIndexWorkers
 	}
 
@@ -292,7 +292,7 @@ func (v *RadosVolume) Start() error {
 	}
 
 	rv_major, rv_minor, rv_patch := v.rados.Version()
-	theConfig.debugLogf("rados: using librados version %d.%d.%d", rv_major, rv_minor, rv_patch)
+	log.Infof("rados: using librados version %d.%d.%d", rv_major, rv_minor, rv_patch)
 
 	conn, err := v.rados.NewConnWithClusterAndUser(v.Cluster, v.User)
 	if err != nil {
@@ -327,20 +327,20 @@ func (v *RadosVolume) Start() error {
 	if err != nil {
 		return fmt.Errorf("rados: error connecting to rados cluster: %v", err)
 	}
-	theConfig.debugLogf("rados: connected to cluster '%s' as user '%s'", v.Cluster, v.User)
+	log.Infof("rados: connected to cluster '%s' as user '%s'", v.Cluster, v.User)
 
 	fsid, err := v.conn.GetFSID()
 	if err != nil {
 		return fmt.Errorf("rados: error getting rados cluster FSID: %v", err)
 	}
 	v.FSID = fsid
-	theConfig.debugLogf("rados: cluster FSID is '%s'", v.FSID)
+	log.Infof("rados: cluster FSID is '%s'", v.FSID)
 
 	cs, err := v.conn.GetClusterStats()
 	if err != nil {
 		return fmt.Errorf("rados: error getting rados cluster stats: %v", err)
 	}
-	theConfig.debugLogf("rados: cluster %s has %.1f GiB with %.1f GiB used in %d objects and %.1f GiB available", v.Cluster, float64(cs.Kb)/1024/1024, float64(cs.Kb_used)/1024/1024, cs.Num_objects, float64(cs.Kb_avail)/1024/1024)
+	log.Infof("rados: cluster %s has %.1f GiB with %.1f GiB used in %d objects and %.1f GiB available", v.Cluster, float64(cs.Kb)/1024/1024, float64(cs.Kb_used)/1024/1024, cs.Num_objects, float64(cs.Kb_avail)/1024/1024)
 
 	pools, err := v.conn.ListPools()
 	if err != nil {
@@ -349,13 +349,13 @@ func (v *RadosVolume) Start() error {
 	if !stringInSlice(v.Pool, pools) {
 		return fmt.Errorf("rados: pool '%s' not present in cluster %s. available pools in this cluster are: %v", v.Pool, v.Cluster, pools)
 	}
-	theConfig.debugLogf("rados: pool '%s' was found", v.Pool)
+	log.Debugf("rados: pool '%s' was found", v.Pool)
 
 	ioctx, err := v.conn.OpenIOContext(v.Pool)
 	if err != nil {
 		return fmt.Errorf("rados: error opening IO context for pool '%s': %v", v.Pool, err)
 	}
-	theConfig.debugLogf("rados: pool '%s' was opened", v.Pool)
+	log.Debugf("rados: pool '%s' was opened", v.Pool)
 
 	ioctx.SetNamespace(RadosKeepNamespace)
 
@@ -365,12 +365,12 @@ func (v *RadosVolume) Start() error {
 		v.RadosReplication = 1
 		ps, err := v.ioctx.GetPoolStats()
 		if err != nil {
-			theConfig.debugLogf("rados: failed to get pool stats, set RadosReplication to 1: %v", err)
+			log.Warnf("rados: failed to get pool stats, set RadosReplication to 1: %v", err)
 		} else {
 			if ps.Num_objects > 0 {
 				actualReplication := float64(ps.Num_object_clones) / float64(ps.Num_objects)
 				v.RadosReplication = int(math.Ceil(actualReplication))
-				theConfig.debugLogf("rados: pool has %d objects and %d object clones for an actual replication of %.2f, set RadosReplication to %d", ps.Num_objects, ps.Num_object_clones, actualReplication, v.RadosReplication)
+				log.Infof("rados: pool has %d objects and %d object clones for an actual replication of %.2f, set RadosReplication to %d", ps.Num_objects, ps.Num_object_clones, actualReplication, v.RadosReplication)
 			}
 		}
 	}
@@ -734,7 +734,7 @@ func (v *RadosVolume) Mtime(loc string) (mtime time.Time, err error) {
 	}
 
 	mtime, err = v.mtimeNoTrashCheck(loc)
-	radosTracef("rados: Mtime loc=%s completed, returning mtime=%s err=%v", loc, mtime, err)
+	radosTracef("rados: Mtime loc=%s complete, returning mtime=%s err=%v", loc, mtime, err)
 	return
 }
 
@@ -771,7 +771,7 @@ func (v *RadosVolume) mtimeNoTrashCheck(loc string) (mtime time.Time, err error)
 		return
 	}
 	v.stats.TickErr(err)
-	radosTracef("rados: mtimeNoTrashCheck loc=%s completed, returning mtime=%s err=%v", loc, mtime, err)
+	radosTracef("rados: mtimeNoTrashCheck loc=%s complete, returning mtime=%s err=%v", loc, mtime, err)
 	return
 }
 
@@ -961,7 +961,7 @@ func (v *RadosVolume) Untrash(loc string) (err error) {
 
 	// mark as not trash
 	err = v.markNotTrash(loc)
-	radosTracef("rados: Untrash loc=%s completed, returning err=%v", err)
+	radosTracef("rados: Untrash loc=%s complete, returning err=%v", err)
 	return
 }
 
@@ -991,7 +991,7 @@ func (v *RadosVolume) Status() (vs *VolumeStatus) {
 		radosTracef("rados: Status() has pool stats %+v", ps)
 		vs.BytesUsed = ps.Num_bytes
 	}
-	radosTracef("rados: Status() completed, returning vs=%+v", vs)
+	radosTracef("rados: Status() complete, returning vs=%+v", vs)
 	return
 }
 
@@ -1233,10 +1233,10 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 				}
 				switch res {
 				case RadosLockBusy:
-					theConfig.debugLogf("rados: attempting to get %s lock for %s on object %s: lock busy", name, desc, loc)
+					radosTracef("rados: attempting to get %s lock for %s on object %s: lock busy", name, desc, loc)
 					time.Sleep(100 * time.Millisecond)
 				case RadosLockExist:
-					theConfig.debugLogf("rados: attempting to get %s lock for %s on object %s: lock exists", name, desc, loc)
+					radosTracef("rados: attempting to get %s lock for %s on object %s: lock exists", name, desc, loc)
 					time.Sleep(100 * time.Millisecond)
 				case RadosLockLocked:
 					if !create {
@@ -1247,7 +1247,7 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 						// of xattrs which would not exist if the object was just created by our attempt to lock it.
 						exists, err := v.exists(loc)
 						if err != nil {
-							theConfig.debugLogf("rados: lock failed to determine if keep object '%s' exists: %v", loc, err)
+							log.Warnf("rados: lock failed to determine if keep object '%s' exists: %v", loc, err)
 							exists = false
 						}
 						if !exists {
@@ -1255,7 +1255,7 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 							// as the delete also deletes the lock
 							err = v.delete(loc)
 							if err != nil {
-								theConfig.debugLogf("rados: failed to delete object '%s' created by attempt to lock: %v", loc, err)
+								log.Warnf("rados: failed to delete object '%s' created by attempt to lock: %v", loc, err)
 								break LoopUntilLocked
 							}
 							err = os.ErrNotExist
@@ -1277,7 +1277,7 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 	select {
 	case <-locking_finished:
 	case <-ctx.Done():
-		theConfig.debugLogf("rados: abandoning attempt to obtain exclusive %s lock for %s on object %s: %s", name, desc, loc, ctx.Err())
+		log.Warnf("rados: abandoning attempt to obtain exclusive %s lock for %s on object %s: %s", name, desc, loc, ctx.Err())
 		err = ctx.Err()
 	}
 

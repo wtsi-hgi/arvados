@@ -413,7 +413,7 @@ func (v *TestableRadosVolume) TouchWithDate(loc string, mtime time.Time) {
 		radosTracef("radostest: TouchWithDate loc=%s mtime=%v setMtime returned err=%v", loc, mtime, err)
 		v.t.Fatalf("TouchWithDate failed to set mtime for block %s", loc)
 	}
-	radosTracef("radostest: TouchWithDate loc=%s mtime=%v completed, returning.", loc, mtime)
+	radosTracef("radostest: TouchWithDate loc=%s mtime=%v complete, returning.", loc, mtime)
 	return
 }
 
