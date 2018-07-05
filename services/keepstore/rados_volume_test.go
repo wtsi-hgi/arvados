@@ -41,7 +41,7 @@ import (
 )
 
 const (
-	RadosMockPool      = "mocktestpool2"
+	RadosMockPool      = "mocktestpool"
 	RadosMockMonHost   = "mocktestmonhost"
 	RadosMockTotalSize = 1 * 1024 * 1024 * 1024
 	RadosMockFSID      = "mockmock-mock-mock-mock-mockmockmock"
@@ -57,7 +57,7 @@ func init() {
 		"",
 		"Rados pool to use for testing (i.e. to test against a 'real' Ceph cluster such as a ceph/demo docker container). Do not use a pool with real data for testing! Use normal rados volume arguments (e.g. -rados-mon-host, -rados-user, -rados-keyring-file) to supply required parameters to access the pool.")
 
-	RadosMockPools = []string{"mocktestpool0", "mocktestpool1", RadosMockPool, "mocktestpool3", "mocktestpool4"}
+	RadosMockPools = []string{"mocktestpool0", "mocktestpool1", "mocktestpool2", "mocktestpool3", "mocktestpool4", RadosMockPool}
 }
 
 type radosStubObj struct {
@@ -450,6 +450,7 @@ type radosMockConn struct {
 func (conn *radosMockConn) SetConfigOption(option, value string) (err error) {
 	conn.b.Lock()
 	defer conn.b.Unlock()
+
 	conn.b.config[option] = value
 	return
 }
@@ -457,6 +458,7 @@ func (conn *radosMockConn) SetConfigOption(option, value string) (err error) {
 func (conn *radosMockConn) Connect() (err error) {
 	conn.b.Lock()
 	defer conn.b.Unlock()
+
 	conn.connected = true
 	conn.b.fsid = RadosMockFSID
 	for _, pool := range RadosMockPools {
@@ -468,6 +470,7 @@ func (conn *radosMockConn) Connect() (err error) {
 func (conn *radosMockConn) GetFSID() (fsid string, err error) {
 	conn.b.Lock()
 	defer conn.b.Unlock()
+
 	fsid = conn.b.fsid
 	if !conn.connected {
 		err = fmt.Errorf("radosmock: GetFSID called before Connect")
@@ -478,6 +481,7 @@ func (conn *radosMockConn) GetFSID() (fsid string, err error) {
 func (conn *radosMockConn) GetClusterStats() (stat rados.ClusterStat, err error) {
 	conn.b.Lock()
 	defer conn.b.Unlock()
+
 	if !conn.connected {
 		panic("radosmock: GetClusterStats called before Connect")
 	}
@@ -498,6 +502,7 @@ func (conn *radosMockConn) GetClusterStats() (stat rados.ClusterStat, err error)
 func (conn *radosMockConn) ListPools() (names []string, err error) {
 	conn.b.Lock()
 	defer conn.b.Unlock()
+
 	names = make([]string, len(conn.b.pools))
 	i := 0
 	for k := range conn.b.pools {
@@ -530,6 +535,7 @@ type radosMockIoctx struct {
 func (ioctx *radosMockIoctx) Delete(oid string) (err error) {
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
+
 	_, ok := ioctx.objects[oid]
 	if !ok {
 		err = rados.RadosErrorNotFound
@@ -560,6 +566,7 @@ func (ioctx *radosMockIoctx) GetPoolStats() (stat rados.PoolStat, err error) {
 func (ioctx *radosMockIoctx) GetXattr(oid string, name string, data []byte) (n int, err error) {
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
+
 	obj, ok := ioctx.objects[oid]
 	if !ok {
 		err = rados.RadosErrorNotFound
@@ -577,8 +584,16 @@ func (ioctx *radosMockIoctx) Iter() (iter radosIter, err error) {
 	ioctx.b.Lock()
 	defer ioctx.b.Unlock()
 
+	oids := make([]string, len(ioctx.objects))
+	i := 0
+	for oid := range ioctx.objects {
+		oids[i] = oid
+		i++
+	}
 	iter = &radosMockIter{
 		radosMockIoctx: ioctx,
+		oids:           oids,
+		current:        -1,
 	}
 	return
 }
@@ -750,24 +765,32 @@ func (ioctx *radosMockIoctx) WriteFull(oid string, data []byte) (err error) {
 
 	obj, ok := ioctx.objects[oid]
 	if !ok {
-		ioctx.objects[oid] = newRadosStubObj(data)
-		return
+		ioctx.objects[oid] = newRadosStubObj([]byte{})
 	}
-
-	obj.data = data
+	copy(obj.data, data)
 	return
 }
 
 type radosMockIter struct {
 	*radosMockIoctx
+	oids    []string
+	current int
 }
 
 func (iter *radosMockIter) Next() bool {
-	return false
+	iter.current++
+	if iter.current >= len(iter.oids) {
+		return false
+	}
+	return true
 }
 
 func (iter *radosMockIter) Value() string {
-	return "itervalue"
+	if iter.current >= 0 && iter.current < len(iter.oids) {
+		return iter.oids[iter.current]
+	} else {
+		return ""
+	}
 }
 
 func (iter *radosMockIter) Close() {
