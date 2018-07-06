@@ -992,27 +992,21 @@ func (v *RadosVolume) Status() (vs *VolumeStatus) {
 		radosTracef("rados: Status() has cluster stats %+v", cs)
 		vs.BytesFree = cs.Kb_avail * 1024
 	}
-	tries := 0
-	for {
-		tries++
-		ps, err := v.ioctx.GetPoolStats()
-		if err != nil {
-			log.Printf("rados: %s: failed to get pool stats, Status will not report BytesUsed correctly: %v", v, err)
-			return
-		} else {
-			radosTracef("rados: Status() has pool stats %+v", ps)
-			vs.BytesUsed = ps.Num_bytes
-		}
-		if vs.BytesUsed > 0 {
-			radosTracef("rados: Status() breaking out after getting status %d times", tries)
-			break
-		} else {
-			time.Sleep(100 * time.Millisecond)
-		}
-		if tries > 600 {
-			radosTracef("rados: Status() breaking out unsatisfied")
-		}
+	ps, err := v.ioctx.GetPoolStats()
+	if err != nil {
+		log.Printf("rados: %s: failed to get pool stats, Status will not report BytesUsed correctly: %v", v, err)
+		return
 	}
+	radosTracef("rados: Status() has pool stats %+v", ps)
+	if ps.Num_bytes > 0 {
+		// the generic tests do not ever want BytesUsed to be 0
+		// so we must not set it to 0 even if we get that from
+		// the backend. Note that the pool stats can lag behind
+		// reality somewhat, so Num_bytes may still be zero if
+		// an object has just been added to an empty pool.
+		vs.BytesUsed = ps.Num_bytes
+	}
+
 	radosTracef("rados: Status() complete, returning vs=%+v", vs)
 	return
 }
