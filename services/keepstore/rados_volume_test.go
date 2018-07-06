@@ -28,6 +28,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -131,30 +132,38 @@ type TestableRadosVolume struct {
 	*RadosVolume
 	radosStubBackend *radosStubBackend
 	t                TB
+	useMock          bool
 }
 
 func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRadosVolume {
-	var v *RadosVolume
+	var tv *TestableRadosVolume
 	radosTracef("rados test: NewTestableRadosVolume readonly=%v replication=%d", readonly, replication)
 	radosStubBackend := newRadosStubBackend(uint64(replication))
 	pool := radosTestPool
-	if pool == "" {
+	useMock := pool == ""
+	if useMock {
 		// Connect using mock radosImplementation instead of real Ceph
 		log.Infof("rados test: using mock radosImplementation")
 		radosMock := &radosMockImpl{
 			b: radosStubBackend,
 		}
-		v = &RadosVolume{
+		v := &RadosVolume{
 			Pool:             RadosMockPool,
 			MonHost:          RadosMockMonHost,
 			ReadOnly:         readonly,
 			RadosReplication: replication,
 			rados:            radosMock,
 		}
+		tv = &TestableRadosVolume{
+			RadosVolume:      v,
+			radosStubBackend: radosStubBackend,
+			t:                t,
+			useMock:          useMock,
+		}
 	} else {
 		// Connect to real Ceph using the real radosImplementation
 		log.Infof("rados test: using real radosImplementation")
-		v = &RadosVolume{
+		v := &RadosVolume{
 			Pool:             pool,
 			KeyringFile:      radosKeyringFile,
 			MonHost:          radosMonHost,
@@ -163,18 +172,19 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 			ReadOnly:         readonly,
 			RadosReplication: replication,
 		}
+		tv = &TestableRadosVolume{
+			RadosVolume: v,
+			t:           t,
+			useMock:     useMock,
+		}
 	}
 
-	tv := &TestableRadosVolume{
-		RadosVolume:      v,
-		radosStubBackend: radosStubBackend,
-		t:                t,
-	}
-
+	// Start
 	err := tv.Start()
 	if err != nil {
 		t.Error(err)
 	}
+
 	return tv
 }
 
@@ -417,4 +427,68 @@ func (v *TestableRadosVolume) TouchWithDate(loc string, mtime time.Time) {
 	return
 }
 
-func (v *TestableRadosVolume) Teardown() {}
+func (v *TestableRadosVolume) Teardown() {
+	if !v.useMock {
+		// When using a real Ceph pool we need to clean out all data
+		// after each test.
+		err := v.deleteAllObjects()
+		if err != nil {
+			v.t.Error(err)
+		}
+	}
+}
+
+type errListEntry struct {
+	err error
+}
+
+func (ile *errListEntry) String() string {
+	return fmt.Sprintf("%s", ile.err)
+}
+
+func (ile *errListEntry) Err() error {
+	return ile.err
+}
+
+func (v *TestableRadosVolume) deleteAllObjects() (err error) {
+	radosTracef("rados test: deleteAllObjects()")
+
+	// filter to include all objects
+	filterFunc := func(loc string) (bool, error) {
+		return true, nil
+	}
+
+	// delete each loc and return empty listEntry
+	mapFunc := func(loc string) listEntry {
+		delErr := v.delete(loc)
+		if delErr != nil {
+			log.Warnf("rados test: deleteAllObjects() failed to delete %s: %v", loc, delErr)
+			return &errListEntry{
+				err: delErr,
+			}
+		}
+		return &errListEntry{}
+	}
+
+	// count number of objects deleted and errors
+	deleted := 0
+	errors := 0
+	reduceFunc := func(le listEntry) {
+		if le.Err() != nil {
+			errors++
+		} else {
+			deleted++
+		}
+	}
+
+	workers := 1
+	err = v.listObjects(filterFunc, mapFunc, reduceFunc, workers)
+	if err != nil {
+		log.Printf("rados test: deleteAllObjects() failed to listObjects: %s", err)
+		return
+	}
+	log.Infof("rados test: deleteAllObjects() deleted %d objects and had %d errors", deleted, errors)
+
+	radosTracef("rados test: deleteAllObjects() finished, returning")
+	return
+}

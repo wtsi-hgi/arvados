@@ -363,18 +363,20 @@ func (v *RadosVolume) Start() error {
 	ioctx.SetNamespace(RadosKeepNamespace)
 
 	v.ioctx = ioctx
+
+	ps, err := v.ioctx.GetPoolStats()
+	if err != nil {
+		return fmt.Errorf("rados: error getting pool stats: %v", err)
+	}
+	log.Infof("rados: pool %s has %.1f GiB used in %d objects", v.Pool, float64(ps.Num_kb)/1024/1024, ps.Num_objects)
+
 	if v.RadosReplication == 0 {
 		// RadosReplication was not set or was explicitly set to 0 - determine it from the PoolStats if we can
 		v.RadosReplication = 1
-		ps, err := v.ioctx.GetPoolStats()
-		if err != nil {
-			log.Warnf("rados: failed to get pool stats, set RadosReplication to 1: %v", err)
-		} else {
-			if ps.Num_objects > 0 {
-				actualReplication := float64(ps.Num_object_clones) / float64(ps.Num_objects)
-				v.RadosReplication = int(math.Ceil(actualReplication))
-				log.Infof("rados: pool has %d objects and %d object clones for an actual replication of %.2f, set RadosReplication to %d", ps.Num_objects, ps.Num_object_clones, actualReplication, v.RadosReplication)
-			}
+		if ps.Num_objects > 0 {
+			actualReplication := float64(ps.Num_object_clones) / float64(ps.Num_objects)
+			v.RadosReplication = int(math.Ceil(actualReplication))
+			log.Infof("rados: pool has %d objects and %d object clones for an actual replication of %.2f, set RadosReplication to %d", ps.Num_objects, ps.Num_object_clones, actualReplication, v.RadosReplication)
 		}
 	}
 
@@ -1075,7 +1077,7 @@ func (v *RadosVolume) EmptyTrash() {
 		// actually delete the object
 		err = v.delete(loc)
 		if err != nil {
-			log.Warn("rados: %s: EmptyTrash failed to delete %s: %v", v, loc, err)
+			log.Warnf("rados: %s: EmptyTrash failed to delete %s: %v", v, loc, err)
 			return
 		}
 		atomic.AddInt64(&bytesDeleted, int64(size))
@@ -1100,7 +1102,7 @@ func (v *RadosVolume) EmptyTrash() {
 	workers := theConfig.EmptyTrashWorkers
 	if workers <= 0 {
 		workers = DefaultRadosEmptyTrashWorkers
-		log.Warn(fmt.Sprintf("rados: cannot EmptyTrash with %d EmptyTrashWorkers, using %d instead", theConfig.EmptyTrashWorkers, workers))
+		log.Warnf("rados: cannot EmptyTrash with %d EmptyTrashWorkers, using %d instead", theConfig.EmptyTrashWorkers, workers)
 	}
 	err := v.listObjects(filterFunc, mapFunc, reduceFunc, workers)
 	if err != nil {

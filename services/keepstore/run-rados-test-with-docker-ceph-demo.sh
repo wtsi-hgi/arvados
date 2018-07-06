@@ -48,7 +48,10 @@ cat << EOF > "${keyringfile}"
 EOF
 
 echo "Running TestRados.* go tests using ceph pool ${pool} on mon-host ${ip} with user ${user} and keyring-file ${keyringfile}"
-go test -run 'TestRados.*' -test.rados-pool-volume ${pool} -rados-mon-host ${ip} -rados-user ${user} -rados-keyring-file "${keyringfile}" "$@" || export teststat=$?; true
+set +e
+go test -parallel 1 -run 'TestRados.*' -test.rados-pool-volume ${pool} -rados-mon-host ${ip} -rados-user ${user} -rados-keyring-file "${keyringfile}" "$@"
+export teststat=$?
+set -e
 echo "go test exit status ${teststat}"
 
 echo "Removing keyringfile ${keyringfile}"
