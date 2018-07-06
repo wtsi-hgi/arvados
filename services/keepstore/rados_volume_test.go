@@ -163,14 +163,15 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 			b: radosStubBackend,
 		}
 		v := &RadosVolume{
-			Pool:             RadosMockPool,
-			MonHost:          RadosMockMonHost,
-			ReadOnly:         readonly,
-			RadosReplication: replication,
-			ReadTimeout:      arvados.Duration(10 * time.Second),
-			WriteTimeout:     arvados.Duration(10 * time.Second),
-			MetadataTimeout:  arvados.Duration(10 * time.Second),
-			rados:            radosMock,
+			Pool:              RadosMockPool,
+			MonHost:           RadosMockMonHost,
+			ReadOnly:          readonly,
+			RadosReplication:  replication,
+			RadosIndexWorkers: 4,
+			ReadTimeout:       arvados.Duration(10 * time.Second),
+			WriteTimeout:      arvados.Duration(10 * time.Second),
+			MetadataTimeout:   arvados.Duration(10 * time.Second),
+			rados:             radosMock,
 		}
 		tv = &TestableRadosVolume{
 			RadosVolume:      v,
@@ -182,16 +183,17 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 		// Connect to real Ceph using the real radosImplementation
 		log.Infof("radostest: using real radosImplementation")
 		v := &RadosVolume{
-			Pool:             pool,
-			KeyringFile:      radosKeyringFile,
-			MonHost:          radosMonHost,
-			Cluster:          radosCluster,
-			User:             radosUser,
-			ReadOnly:         readonly,
-			RadosReplication: replication,
-			ReadTimeout:      arvados.Duration(DefaultRadosReadTimeoutSeconds * time.Second),
-			WriteTimeout:     arvados.Duration(DefaultRadosWriteTimeoutSeconds * time.Second),
-			MetadataTimeout:  arvados.Duration(DefaultRadosMetadataTimeoutSeconds * time.Second),
+			Pool:              pool,
+			KeyringFile:       radosKeyringFile,
+			MonHost:           radosMonHost,
+			Cluster:           radosCluster,
+			User:              radosUser,
+			ReadOnly:          readonly,
+			RadosReplication:  replication,
+			RadosIndexWorkers: 4,
+			ReadTimeout:       arvados.Duration(DefaultRadosReadTimeoutSeconds * time.Second),
+			WriteTimeout:      arvados.Duration(DefaultRadosWriteTimeoutSeconds * time.Second),
+			MetadataTimeout:   arvados.Duration(DefaultRadosMetadataTimeoutSeconds * time.Second),
 		}
 		tv = &TestableRadosVolume{
 			RadosVolume: v,
