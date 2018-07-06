@@ -588,7 +588,7 @@ func (v *RadosVolume) Put(ctx context.Context, loc string, block []byte) (err er
 		return MethodDisabledError
 	}
 
-	// get a lock with create = true so that we get the lock even if the
+	// Obtain a lock with create = true so that we get the lock even if the
 	// object does not yet exist (N.B. in this case an empty object will be created
 	// to facilitate the lock, but that is ok as we are about to write to it)
 	lockCookie, err := v.lockExclusive(ctx, loc, RadosLockData, "Put", v.WriteTimeout, true)
