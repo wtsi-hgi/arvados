@@ -3,19 +3,21 @@
 set -euf -o pipefail
 
 ip=$(ip route get 1 | awk 'NR==1 {print $NF}')
-network=$(ip -br address show to ${ip} | awk 'NR==1 {print $NF}')
+network=$(ip -o address show to ${ip} | awk 'NR==1 {print $4}')
 user=client.keeptest
 pool=keeptest
+cluster=ceph
+pool_pgs=8
 
-echo "Creating ceph/demo container"
-container=$(docker run -d --name=ceph-demo --net=host -e MON_IP=${ip} -e CEPH_PUBLIC_NETWORK=${network} -e CLUSTER=ceph ceph/demo)
+echo "Creating ceph/demo container using MON_IP=${ip} CEPH_PUBLIC_NETWORK=${network} CLUSTER=${cluster}"
+container=$(docker run -d --name=ceph-demo --net=host -e MON_IP=${ip} -e CEPH_PUBLIC_NETWORK=${network} -e CLUSTER=${cluster} ceph/demo)
 echo "Created ceph/demo container: ${container}"
 
-echo "Creating ceph user ${user} with access to pool ${pool}"
+echo "Creating ceph user ${user} with r access to monitor and rwx access to pool ${pool}"
 docker exec ${container} ceph auth add ${user} mon "allow r" osd "allow rwx pool=${pool}"
 
 echo "Creating ceph pool ${pool}"
-docker exec ${container} ceph osd pool create ${pool} 8 8 replicated
+docker exec ${container} ceph osd pool create ${pool} ${pool_pgs} ${pool_pgs} replicated
 
 echo "Getting key for user ${user}"
 key=$(docker exec ${container} ceph auth print-key ${user})
@@ -49,7 +51,7 @@ EOF
 
 echo "Running TestRados.* go tests using ceph pool ${pool} on mon-host ${ip} with user ${user} and keyring-file ${keyringfile}"
 set +e
-go test -parallel 1 -run 'TestRados.*' -test.rados-pool-volume ${pool} -rados-mon-host ${ip} -rados-user ${user} -rados-keyring-file "${keyringfile}" "$@"
+go test -parallel 1 -run 'TestRados.*' -test.rados-pool-volume "${pool}" -rados-mon-host "${ip}" -rados-user "${user}" -rados-keyring-file "${keyringfile}" -rados-cluster "${cluster}" "$@"
 export teststat=$?
 set -e
 echo "go test exit status ${teststat}"
