@@ -468,14 +468,18 @@ func (v *RadosVolume) Get(ctx context.Context, loc string, buf []byte) (n int, e
 GetReadUntil:
 	for {
 		read_bytes := 0
+		readComplete := make(chan struct{})
+		go func() {
+			read_bytes, err = v.ioctx.Read(loc, buf[n:], offset)
+			err = v.translateError(err)
+			close(readComplete)
+		}()
 		select {
 		case <-ctx.Done():
 			err = ctx.Err()
 			radosTracef("rados: Get loc=%s len(buf)=%d size=%d failed to read before context expired, returning n=%d err=%v", loc, len(buf), size, n, err)
 			return
-		default:
-			read_bytes, err = v.ioctx.Read(loc, buf[n:], offset)
-			err = v.translateError(err)
+		case <-readComplete:
 			v.stats.Tick(&v.stats.Ops, &v.stats.GetOps)
 			v.stats.TickErr(err)
 			if err != nil {
@@ -508,27 +512,14 @@ GetReadUntil:
 func (v *RadosVolume) Compare(ctx context.Context, loc string, expect []byte) (err error) {
 	radosTracef("rados: Compare loc=%s len(expect)=%d", loc, len(expect))
 
-	// get size of stored block
-	size, err := v.size(loc)
-	if err != nil {
-		radosTracef("rados: Compare loc=%s failed to get size of object, returning err=%v", loc, err)
-		return
-	}
-
-	// compare size of stored block to expected data length
-	if size != uint64(len(expect)) {
-		err = DiskHashError
-		radosTracef("rados: Compare loc=%s size %d is not equal to length of expected data %d, returning err=%v", loc, size, len(expect), err)
-		return
-	}
-
 	// get stored block
-	buf := make([]byte, size)
+	buf := make([]byte, BlockSize)
 	n, err := v.Get(ctx, loc, buf)
 	if err != nil {
 		radosTracef("rados: Compare loc=%s failed to get object, returning err=%v", loc, err)
 		return
 	}
+	buf = buf[:n]
 
 	// compare size of returned data to expected data length
 	if n != len(expect) {
@@ -617,15 +608,26 @@ func (v *RadosVolume) Put(ctx context.Context, loc string, block []byte) (err er
 	// Only write non-empty blocks (as some versions of go-ceph have a problem writing empty buffers)
 	// Note that the lock will have already created an empty object so the write is already done.
 	if len(block) > 0 {
-		err = v.ioctx.WriteFull(loc, block)
-		err = v.translateError(err)
-		v.stats.Tick(&v.stats.Ops, &v.stats.PutOps)
-		v.stats.TickErr(err)
-		if err != nil {
-			radosTracef("rados: Put loc=%s len(block)=%d failed to write block, returning err=%v", loc, len(block), err)
+		writeComplete := make(chan struct{})
+		go func() {
+			err = v.ioctx.WriteFull(loc, block)
+			err = v.translateError(err)
+			close(writeComplete)
+		}()
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+			radosTracef("rados: Put loc=%s len(block)=%d failed to write before context expired, returning err=%v", loc, len(block), err)
 			return
+		case <-writeComplete:
+			v.stats.Tick(&v.stats.Ops, &v.stats.PutOps)
+			v.stats.TickErr(err)
+			if err != nil {
+				radosTracef("rados: Put loc=%s len(block)=%d failed to write block, returning err=%v", loc, len(block), err)
+				return
+			}
+			v.stats.TickOutBytes(uint64(len(block)))
 		}
-		v.stats.TickOutBytes(uint64(len(block)))
 	}
 
 	// Since we have just put this object, it is no longer trash.
