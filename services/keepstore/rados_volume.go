@@ -193,6 +193,7 @@ type radosConn interface {
 	GetClusterStats() (stat rados.ClusterStat, err error)
 	ListPools() (names []string, err error)
 	OpenIOContext(pool string) (radosIOContext, error)
+	Shutdown()
 }
 
 type radosIOContext interface {

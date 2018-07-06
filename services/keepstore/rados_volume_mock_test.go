@@ -151,6 +151,10 @@ func (conn *radosMockConn) OpenIOContext(pool string) (ioctx radosIOContext, err
 	return
 }
 
+func (conn *radosMockConn) Shutdown() {
+	radosTracef("radosmock: conn.Shutdown()")
+}
+
 type radosMockIoctx struct {
 	*radosMockConn
 	pool      string

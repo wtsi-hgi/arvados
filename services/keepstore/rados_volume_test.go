@@ -409,6 +409,8 @@ func (v *TestableRadosVolume) Teardown() {
 			v.t.Error(err)
 		}
 	}
+	// we also must call conn.Shutdown or else librados will leak threads like crazy every time we abandon a RadosVolume and create a new one
+	v.conn.Shutdown()
 }
 
 type errListEntry struct {
