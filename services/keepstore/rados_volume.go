@@ -585,6 +585,9 @@ func (v *RadosVolume) Put(ctx context.Context, loc string, block []byte) (err er
 	lockCookie, err := v.lockExclusive(ctx, loc, RadosLockData, "Put", v.WriteTimeout, true)
 	if err != nil {
 		radosTracef("rados: Put loc=%s len(block)=%d failed to obtain lock, returning err=%v", loc, len(block), err)
+		if err == rados.RadosErrorPermissionDenied {
+			log.Errorf("rados: got permission denied attempting to obtain a lock. please ensure ceph client '%s' has 'rwx' permission on ceph pool '%s' ('rw' is not sufficient)", v.User, v.Pool)
+		}
 		return
 	}
 	defer func() {
@@ -1245,9 +1248,11 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 					res, err = v.ioctx.LockShared(loc, name, lockCookie, "", desc, time.Duration(timeout), nil)
 					radosTracef("rados: lock call to rados LockShared for %s lock on loc=%s with lockCookie=%s returned res=%v err=%v", name, loc, lockCookie, res, err)
 				}
+				err = v.translateError(err)
 				v.stats.Tick(&v.stats.Ops, &v.stats.LockOps)
 				v.stats.TickErr(err)
 				if err != nil {
+					close(locking_finished)
 					return
 				}
 				switch res {
@@ -1285,6 +1290,7 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 					locked = true
 				default:
 					err = fmt.Errorf("rados: attempting to get %s lock for %s on object %s: unexpected non-error return value %d from underlying lock function", name, desc, loc, res)
+					close(locking_finished)
 					return
 				}
 			}
