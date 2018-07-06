@@ -340,6 +340,9 @@ func (v *RadosVolume) Start() error {
 	if err != nil {
 		return fmt.Errorf("rados: error getting rados cluster stats: %v", err)
 	}
+	if cs.Kb_avail == 0 {
+		log.Warnf("rados: cluster has no space available")
+	}
 	log.Infof("rados: cluster %s has %.1f GiB with %.1f GiB used in %d objects and %.1f GiB available", v.Cluster, float64(cs.Kb)/1024/1024, float64(cs.Kb_used)/1024/1024, cs.Num_objects, float64(cs.Kb_avail)/1024/1024)
 
 	pools, err := v.conn.ListPools()
@@ -1019,9 +1022,11 @@ func (v *RadosVolume) Writable() bool {
 // Replication returns the storage redundancy of the
 // underlying device. It will be passed on to clients in
 // responses to PUT requests.
-func (v *RadosVolume) Replication() int {
-	radosTracef("rados: Replication")
-	return v.RadosReplication
+func (v *RadosVolume) Replication() (replication int) {
+	radosTracef("rados: Replication()")
+	replication = v.RadosReplication
+	radosTracef("rados: Replication() complete, returning replication=%d", replication)
+	return
 }
 
 // EmptyTrash looks for trashed blocks that exceeded TrashLifetime
