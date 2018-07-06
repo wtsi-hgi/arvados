@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"git.curoverse.com/arvados.git/sdk/go/arvados"
 	"github.com/ghodss/yaml"
 	check "gopkg.in/check.v1"
 )
@@ -141,6 +142,7 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 	radosStubBackend := newRadosStubBackend(uint64(replication))
 	pool := radosTestPool
 	useMock := pool == ""
+
 	if useMock {
 		// Connect using mock radosImplementation instead of real Ceph
 		log.Infof("rados test: using mock radosImplementation")
@@ -152,6 +154,9 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 			MonHost:          RadosMockMonHost,
 			ReadOnly:         readonly,
 			RadosReplication: replication,
+			ReadTimeout:      arvados.Duration(10 * time.Second),
+			WriteTimeout:     arvados.Duration(10 * time.Second),
+			MetadataTimeout:  arvados.Duration(10 * time.Second),
 			rados:            radosMock,
 		}
 		tv = &TestableRadosVolume{
@@ -171,6 +176,9 @@ func NewTestableRadosVolume(t TB, readonly bool, replication int) *TestableRados
 			User:             radosUser,
 			ReadOnly:         readonly,
 			RadosReplication: replication,
+			ReadTimeout:      arvados.Duration(DefaultRadosReadTimeoutSeconds * time.Second),
+			WriteTimeout:     arvados.Duration(DefaultRadosWriteTimeoutSeconds * time.Second),
+			MetadataTimeout:  arvados.Duration(DefaultRadosMetadataTimeoutSeconds * time.Second),
 		}
 		tv = &TestableRadosVolume{
 			RadosVolume: v,

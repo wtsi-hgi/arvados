@@ -66,19 +66,22 @@ var (
 )
 
 const (
-	RFC3339NanoMaxLen             = 36
-	RadosLockNotFound             = -2
-	RadosLockBusy                 = -16
-	RadosLockExist                = -17
-	RadosLockLocked               = 0
-	RadosLockUnlocked             = 0
-	RadosLockData                 = "keep_lock_data"
-	RadosLockTouch                = "keep_lock_touch"
-	RadosXattrMtime               = "keep_mtime"
-	RadosXattrTrash               = "keep_trash"
-	RadosKeepNamespace            = "keep"
-	DefaultRadosIndexWorkers      = 64
-	DefaultRadosEmptyTrashWorkers = 1
+	RFC3339NanoMaxLen                  = 36
+	RadosLockNotFound                  = -2
+	RadosLockBusy                      = -16
+	RadosLockExist                     = -17
+	RadosLockLocked                    = 0
+	RadosLockUnlocked                  = 0
+	RadosLockData                      = "keep_lock_data"
+	RadosLockTouch                     = "keep_lock_touch"
+	RadosXattrMtime                    = "keep_mtime"
+	RadosXattrTrash                    = "keep_trash"
+	RadosKeepNamespace                 = "keep"
+	DefaultRadosIndexWorkers           = 64
+	DefaultRadosEmptyTrashWorkers      = 1
+	DefaultRadosReadTimeoutSeconds     = 3600
+	DefaultRadosWriteTimeoutSeconds    = 3600
+	DefaultRadosMetadataTimeoutSeconds = 60
 )
 
 type radosVolumeAdder struct {
@@ -159,17 +162,17 @@ func init() {
 	flag.DurationVar(
 		&radosReadTimeout,
 		"rados-read-timeout",
-		60*time.Minute,
+		DefaultRadosReadTimeoutSeconds*time.Second,
 		"Timeout for read operations.")
 	flag.DurationVar(
 		&radosWriteTimeout,
 		"rados-write-timeout",
-		60*time.Minute,
+		DefaultRadosWriteTimeoutSeconds*time.Second,
 		"Timeout for write operations.")
 	flag.DurationVar(
 		&radosMetadataTimeout,
 		"rados-metadata-timeout",
-		1*time.Minute,
+		DefaultRadosMetadataTimeoutSeconds*time.Second,
 		"Timeout for metadata operations.")
 
 	RadosMinReadTimeout = arvados.Duration(1 * time.Second)
@@ -989,12 +992,26 @@ func (v *RadosVolume) Status() (vs *VolumeStatus) {
 		radosTracef("rados: Status() has cluster stats %+v", cs)
 		vs.BytesFree = cs.Kb_avail * 1024
 	}
-	ps, err := v.ioctx.GetPoolStats()
-	if err != nil {
-		log.Printf("rados: %s: failed to get pool stats, Status will not report BytesUsed correctly: %v", v, err)
-	} else {
-		radosTracef("rados: Status() has pool stats %+v", ps)
-		vs.BytesUsed = ps.Num_bytes
+	tries := 0
+	for {
+		tries++
+		ps, err := v.ioctx.GetPoolStats()
+		if err != nil {
+			log.Printf("rados: %s: failed to get pool stats, Status will not report BytesUsed correctly: %v", v, err)
+			return
+		} else {
+			radosTracef("rados: Status() has pool stats %+v", ps)
+			vs.BytesUsed = ps.Num_bytes
+		}
+		if vs.BytesUsed > 0 {
+			radosTracef("rados: Status() breaking out after getting status %d times", tries)
+			break
+		} else {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if tries > 600 {
+			radosTracef("rados: Status() breaking out unsatisfied")
+		}
 	}
 	radosTracef("rados: Status() complete, returning vs=%+v", vs)
 	return
@@ -1211,7 +1228,7 @@ func (v *RadosVolume) lockShared(ctx context.Context, loc string, name string, d
 // will fail and return an error unless the create argument
 // is set to true.
 func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc string, timeout arvados.Duration, create bool, exclusive bool) (lockCookie string, err error) {
-	radosTracef("rados: lock")
+	radosTracef("rados: lock loc=%s name=%s desc=%s timeout=%v create=%v exclusive=%v", loc, name, desc, timeout, create, exclusive)
 	locking_finished := make(chan bool)
 	lockCookie = uuid.Must(uuid.NewV4()).String()
 
@@ -1222,7 +1239,6 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 		for !locked {
 			select {
 			case <-ctx.Done():
-				close(locking_finished)
 				return
 			default:
 				res := 0
@@ -1278,34 +1294,38 @@ func (v *RadosVolume) lock(ctx context.Context, loc string, name string, desc st
 			}
 		}
 		close(locking_finished)
+		return
 	}()
 
 	// block on either locking_finished or ctx.Done()
 	select {
 	case <-locking_finished:
 	case <-ctx.Done():
+		close(locking_finished)
 		log.Warnf("rados: abandoning attempt to obtain exclusive %s lock for %s on object %s: %s", name, desc, loc, ctx.Err())
 		err = ctx.Err()
 	}
 
-	radosTracef("rados: lock %s on loc=%s returning with lockCookie=%s err=%v", name, loc, lockCookie, err)
+	radosTracef("rados: lock loc=%s name=%s desc=%s timeout=%v create=%v exclusive=%v complete, returning lockCookie=%s err=%v", loc, name, desc, timeout, create, exclusive, lockCookie, err)
 	return
 }
 
 // unlock previously obtained data lock
 func (v *RadosVolume) unlock(loc string, name string, lockCookie string) (err error) {
-	radosTracef("rados: unlock")
+	radosTracef("rados: unlock loc=%s name=%s lockCookie=%s", loc, name, lockCookie)
 	res := 0
 	res, err = v.ioctx.Unlock(loc, name, lockCookie)
 	err = v.translateError(err)
 	v.stats.Tick(&v.stats.Ops, &v.stats.UnlockOps)
 	v.stats.TickErr(err)
 	if err != nil {
+		radosTracef("rados: unlock loc=%s name=%s lockCookie=%s got error unlocking, returning err=%v", loc, name, lockCookie, err)
 		return
 	}
 	if res == RadosLockNotFound {
 		err = fmt.Errorf("rados: attempting to unlock %s lock on object %s, lock was not held for cookie '%s'", name, loc, lockCookie)
 	}
+	radosTracef("rados: unlock loc=%s name=%s lockCookie=%s complete, returning err=%v", loc, name, lockCookie, err)
 	return
 }
 
