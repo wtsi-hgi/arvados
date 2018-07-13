@@ -213,6 +213,16 @@ common:
   # "properties" hashes) are not counted against this limit.
   max_index_database_read: 134217728
 
+  # Number of milliseconds a database statement may take before it is
+  # aborted. Applied to ActiveRecord queries in models. A value of zero
+  # turns this off.
+  database_statement_timeout: 0
+
+  # Number of milliseconds an attempt to acquire a database lock
+  # may take before it is aborted. Applied to ActiveRecord queries in
+  # models. A value of zero turns this off.
+  database_lock_timeout: 0
+
   # Maximum number of items to return when responding to a APIs that
   # can return partial result sets using limit and offset parameters
   # (e.g., *.index, groups.contents). If a request specifies a "limit"
