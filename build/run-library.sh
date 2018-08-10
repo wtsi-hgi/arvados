@@ -57,7 +57,7 @@ version_from_git() {
         prefix="0.1"
     fi
 
-    declare "$(format_last_commit_here 'git_ts=%ct git_hash=%h')"
+    declare $(format_last_commit_here "git_ts=%ct git_hash=%h")
     ARVADOS_BUILDING_VERSION="$(git describe --abbrev=0).$(date -ud "@$git_ts" +%Y%m%d%H%M%S)"
     echo "$ARVADOS_BUILDING_VERSION"
 } 
@@ -135,7 +135,7 @@ package_go_binary() {
         cd "$GOPATH/src/git.curoverse.com/arvados.git/$dir"
         ts="$(timestamp_from_git)"
         if [[ "$ts" -gt "$timestamp" ]]; then
-            version="$(version_from_git)"
+            version=$(version_from_git)
             timestamp="$ts"
         fi
     done
@@ -273,7 +273,7 @@ test_package_presence() {
           repo_subdir=${pkgname:0:1}
         fi
 
-        repo_pkg_list="$(curl -o - http://apt.arvados.org/pool/${D}/main/${repo_subdir}/)"
+        repo_pkg_list=$(curl -o - http://apt.arvados.org/pool/${D}/main/${repo_subdir}/)
         echo ${repo_pkg_list} |grep -q ${complete_pkgname}
         if [ $? -eq 0 ]; then
           echo "Package $complete_pkgname exists, not rebuilding!"
@@ -287,7 +287,7 @@ test_package_presence() {
     else
       centos_repo="http://rpm.arvados.org/CentOS/7/dev/x86_64/"
 
-      repo_pkg_list="$(curl -o - ${centos_repo})"
+      repo_pkg_list=$(curl -o - ${centos_repo})
       echo ${repo_pkg_list} |grep -q ${complete_pkgname}
       if [ $? -eq 0 ]; then
         echo "Package $complete_pkgname exists, not rebuilding!"
@@ -576,7 +576,7 @@ install_package() {
 
 title () {
     txt="********** $1 **********"
-    printf "\n%*s%s\n\n" "$((($COLUMNS-${#txt})/2))" "" "$txt"
+    printf "\n%*s%s\n\n" $((($COLUMNS-${#txt})/2)) "" "$txt"
 }
 
 checkexit() {
