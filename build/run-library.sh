@@ -38,7 +38,7 @@ EOF
 
 format_last_commit_here() {
     local format="$1"; shift
-    TZ=UTC git log -n1 --first-parent "--format=format:$format" . || {echo "git log command failed - is $(pwd) a git repo?"; exit 1}
+    TZ=UTC git log -n1 --first-parent "--format=format:$format" . || { echo "git log command failed - is $(pwd) a git repo?"; exit 1; }
 }
 
 version_from_git() {
