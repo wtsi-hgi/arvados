@@ -219,6 +219,15 @@ if [[ -n "$test_packages" ]]; then
         fi
         echo
         echo "START: $p test on $IMAGE" >&2
+	echo docker run --ulimit nofile=4096:4096 \
+            --rm \
+            "${docker_volume_args[@]}" \
+            --env ARVADOS_DEBUG=$ARVADOS_DEBUG \
+            --env "TARGET=$TARGET" \
+            --env "WORKSPACE=/arvados" \
+            "$IMAGE" $COMMAND $p
+	echo "sleeping..."
+	sleep 3600
         # ulimit option can be removed when debian8 and ubuntu1404 are retired
         if docker run --ulimit nofile=4096:4096 \
             --rm \
