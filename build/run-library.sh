@@ -38,7 +38,7 @@ EOF
 
 format_last_commit_here() {
     local format="$1"; shift
-    TZ=UTC git log -n1 --first-parent "--format=format:$format" . || { echo "git log command failed - is $(pwd) a git repo?"; exit 1; }
+    TZ=UTC git log -n1 --first-parent "--format=format:$format" .
 }
 
 version_from_git() {
@@ -57,7 +57,7 @@ version_from_git() {
         prefix="0.1"
     fi
 
-    declare $(format_last_commit_here "git_ts=%ct git_hash=%h")
+    declare x=1 $(format_last_commit_here "git_ts=%ct git_hash=%h")
     ARVADOS_BUILDING_VERSION="$(git describe --abbrev=0).$(date -ud "@$git_ts" +%Y%m%d%H%M%S)"
     echo "$ARVADOS_BUILDING_VERSION"
 } 
