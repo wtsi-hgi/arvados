@@ -96,15 +96,23 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		d.mtx.Unlock()
 
 		// Containers I currently own (Locked/Running)
-		querySuccess := d.checkForUpdates([][]interface{}{
+		lockedQuerySuccess := d.checkForUpdates([][]interface{}{
 			{"locked_by_uuid", "=", d.auth.UUID}}, todo)
 
-		// Containers I should try to dispatch
-		querySuccess = d.checkForUpdates([][]interface{}{
-			{"state", "=", Queued},
-			{"priority", ">", "0"}}, todo) && querySuccess
+		if !lockedQuerySuccess {
+		        log.Printf("debug: checkForUpdates on containers locked_by_uuid = %s failed", d.auth.UUID)
+		}
 
-		if !querySuccess {
+		// Containers I should try to dispatch
+		queuedQuerySuccess := d.checkForUpdates([][]interface{}{
+			{"state", "=", Queued},
+			{"priority", ">", "0"}}, todo)
+
+		if !queuedQuerySuccess {
+		        log.Printf("debug: checkForUpdates on %s containers with priority > 0 failed", Queued)
+		}
+
+		if (!lockedQuerySuccess) || (!queuedQuerySuccess) {
 			// There was an error in one of the previous queries,
 			// we probably didn't get updates for all the
 			// containers we should have.  Don't check them
@@ -119,6 +127,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 			missed = append(missed, uuid)
 		}
 
+		var knownQuerySuccess bool
 		for len(missed) > 0 {
 			var batch []string
 			if len(missed) > 20 {
@@ -128,14 +137,15 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 				batch = missed
 				missed = missed[0:0]
 			}
-			querySuccess = d.checkForUpdates([][]interface{}{
-				{"uuid", "in", batch}}, todo) && querySuccess
+			knownQuerySuccess = d.checkForUpdates([][]interface{}{
+				{"uuid", "in", batch}}, todo)
 		}
 
-		if !querySuccess {
+		if !knownQuerySuccess {
 			// There was an error in one of the previous queries, we probably
 			// didn't see all the containers we should have, so don't shut down
 			// the missed containers.
+ 		        log.Printf("debug: checkForUpdates on known containers failed")
 			continue
 		}
 
@@ -184,14 +194,17 @@ func (d *Dispatcher) checkForUpdates(filters [][]interface{}, todo map[string]*r
 		"limit": d.BatchSize,
 		"order":   []string{"priority desc"}}
 	offset := 0
+	log.Printf("debug: checkForUpdates will fetch %d containers in batches of %d with filters %v", itemsAvailable, d.BatchSize, filters)
 	for {
 		params["offset"] = offset
+		log.Printf("debug: checkForUpdates calling containers list at offset %d", offset)
 		var list arvados.ContainerList
 		err := d.Arv.List("containers", params, &list)
 		if err != nil {
 			log.Printf("Error getting list of containers: %q", err)
 			return false
 		}
+		log.Printf("debug: checkForUpdates processing list of %d containers", len(list.Items))
 		d.checkListForUpdates(list.Items, todo)
 		offset += len(list.Items)
 		if len(list.Items) == 0 || itemsAvailable <= offset {
@@ -226,6 +239,7 @@ func (d *Dispatcher) checkListForUpdates(containers []arvados.Container, todo ma
 			switch c.State {
 			case Queued:
 				if !d.throttle.Check(c.UUID) {
+			                log.Printf("debug: not locking Queued container %s due to throttling", c.UUID)
 					break
 				}
 				err := d.lock(c.UUID)
