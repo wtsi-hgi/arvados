@@ -256,11 +256,6 @@ func (disp *Dispatcher) submit(container arvados.Container, crunchRunCommand []s
 	crArgs = append(crArgs, container.UUID)
 	crScript := strings.NewReader(execScript(crArgs))
 
-	log.Printf("debug: submit getting Lock on sqCheck for container %s", container.UUID)
-	disp.sqCheck.L.Lock()
-	defer disp.sqCheck.L.Unlock()
-
-	log.Printf("debug: submit calling sbatchArgs for container %s", container.UUID)
 	sbArgs, err := disp.sbatchArgs(container)
 	if err != nil {
 	        log.Printf("debug: submit got error from sbatchArgs for container %s: %v", container.UUID, err)
@@ -362,10 +357,7 @@ func (disp *Dispatcher) runContainer(_ *dispatch.Dispatcher, ctr arvados.Contain
 	}
 }
 func (disp *Dispatcher) scancel(ctr arvados.Container) {
-	disp.sqCheck.L.Lock()
 	err := disp.slurm.Cancel(ctr.UUID)
-	disp.sqCheck.L.Unlock()
-
 	if err != nil {
 		log.Printf("scancel: %s", err)
 		time.Sleep(time.Second)

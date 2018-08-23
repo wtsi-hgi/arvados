@@ -179,26 +179,32 @@ func (d *Dispatcher) checkForUpdates(filters [][]interface{}, todo map[string]*r
 	var countList arvados.ContainerList
 	params := arvadosclient.Dict{
 		"filters": filters,
-		"count": "exact",
-		"limit": 0,
+		"count":   "exact",
+		"limit":   0,
 		"order":   []string{"priority desc"}}
 	err := d.Arv.List("containers", params, &countList)
 	if err != nil {
-		log.Printf("Error getting count of containers: %q", err)
+		log.Printf("error getting count of containers: %q", err)
 		return false
 	}
-	itemsAvailable := countList.ItemsAvailable	
+	itemsAvailable := countList.ItemsAvailable
 	params = arvadosclient.Dict{
 		"filters": filters,
-		"count": "none",
-		"limit": d.BatchSize,
+		"count":   "none",
+		"limit":   d.BatchSize,
 		"order":   []string{"priority desc"}}
 	offset := 0
 	log.Printf("debug: checkForUpdates will fetch %d containers in batches of %d with filters %v", itemsAvailable, d.BatchSize, filters)
 	for {
 		params["offset"] = offset
 		log.Printf("debug: checkForUpdates calling containers list at offset %d", offset)
+
+		// This list variable must be a new one declared
+		// inside the loop: otherwise, items in the API
+		// response would get deep-merged into the items
+		// loaded in previous iterations.
 		var list arvados.ContainerList
+
 		err := d.Arv.List("containers", params, &list)
 		if err != nil {
 			log.Printf("Error getting list of containers: %q", err)
