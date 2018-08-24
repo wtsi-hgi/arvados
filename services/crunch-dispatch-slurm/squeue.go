@@ -47,7 +47,11 @@ func (sqc *SqueueChecker) HasUUID(uuid string) bool {
 	defer sqc.lock.RUnlock()
 
 	// block until next squeue broadcast signaling an update.
+	log.Printf("SqueueChecker.HasUUID: waiting for squeue update for uuid %s", uuid)
+	start := time.Now()
 	sqc.notify.Wait()
+	duration := time.Since(start)
+	log.Printf("SqueueChecker.HasUUID: waited for squeue update for %v (uuid %s)", duration, uuid)
 	_, exists := sqc.queue[uuid]
 	return exists
 }
@@ -62,7 +66,12 @@ func (sqc *SqueueChecker) SetPriority(uuid string, want int64) {
 	if job == nil {
 		// Wait in case the slurm job was just submitted and
 		// will appear in the next squeue update.
+		log.Printf("SqueueChecker.SetPriority: waiting for squeue update for uuid %s", uuid)
+		start := time.Now()
 		sqc.notify.Wait()
+		duration := time.Since(start)
+		log.Printf("SqueueChecker.SetPriority: waited for squeue update for %v (uuid %s)", duration, uuid)
+
 		job = sqc.queue[uuid]
 	}
 	needUpdate := job != nil && job.wantPriority != want
@@ -82,10 +91,15 @@ func (sqc *SqueueChecker) reniceAll() {
 	// other goroutines update sqc.queue or any of the job fields
 	// we use here, so we don't acquire a lock.
 	jobs := make([]*slurmJob, 0, len(sqc.queue))
+	unknownPriorityCount := 0
+	lowPriorityCount := 0
+	start := time.Now()
+	log.Printf("SqueueChecker.reniceAll: looping over sqc.queue of %d entries", len(sqc.queue))
 	for _, j := range sqc.queue {
 		if j.wantPriority == 0 {
 			// SLURM job with unknown Arvados priority
 			// (perhaps it's not an Arvados job)
+			unknownPriorityCount++
 			continue
 		}
 		if j.priority <= 2*slurm15NiceLimit {
@@ -94,11 +108,15 @@ func (sqc *SqueueChecker) reniceAll() {
 			// here, we'll end up trying to push other
 			// jobs below them using negative priority,
 			// which won't help anything.
+			lowPriorityCount++
 			continue
 		}
 		jobs = append(jobs, j)
 	}
+	duration := time.Since(start)
+	log.Printf("SqueueChecker.reniceAll: finished looping over sqc.queue of %d entries in %v - %d jobs had unknown Arvados priority and %d jobs had low priority", len(sqc.queue), duration, unknownPriorityCount, lowPriorityCount)
 
+	start = time.Now()
 	sort.Slice(jobs, func(i, j int) bool {
 		if jobs[i].wantPriority != jobs[j].wantPriority {
 			return jobs[i].wantPriority > jobs[j].wantPriority
@@ -111,20 +129,31 @@ func (sqc *SqueueChecker) reniceAll() {
 		}
 	})
 	renice := wantNice(jobs, sqc.PrioritySpread)
+	duration = time.Since(start)
+	log.Printf("SqueueChecker.reniceAll: sorting jobs took %v", duration)
+	
+	start = time.Now()
+	reniceCount := 0
+	equalCount := 0
+	log.Printf("SqueueChecker.reniceAll: starting renice loop over %d jobs", len(jobs))
 	for i, job := range jobs {
 		niceNew := renice[i]
 		if job.hitNiceLimit && niceNew > slurm15NiceLimit {
 			niceNew = slurm15NiceLimit
 		}
 		if niceNew == job.nice {
+			equalCount++
 			continue
 		}
+		reniceCount++
 		err := sqc.Slurm.Renice(job.uuid, niceNew)
 		if err != nil && niceNew > slurm15NiceLimit && strings.Contains(err.Error(), "Invalid nice value") {
 			log.Printf("container %q clamping nice values at %d, priority order will not be correct -- see https://dev.arvados.org/projects/arvados/wiki/SLURM_integration#Limited-nice-values-SLURM-15", job.uuid, slurm15NiceLimit)
 			job.hitNiceLimit = true
 		}
 	}
+	duration = time.Since(start)
+	log.Printf("SqueueChecker.reniceAll: renice loop over %d jobs complete after %v - reniced %d jobs while %d jobs already had the correct nice value", len(jobs), duration, reniceCount, equalCount)
 }
 
 // Stop stops the squeue monitoring goroutine. Do not call HasUUID
@@ -201,6 +230,7 @@ func (sqc *SqueueChecker) check() {
 	sqc.lock.Lock()
 	sqc.queue = newq
 	sqc.lock.Unlock()
+	log.Printf("SqueueChecker.check(): calling sqc.notify.Broadcast()")
 	sqc.notify.Broadcast()
 }
 
@@ -214,11 +244,18 @@ func (sqc *SqueueChecker) start() {
 		for {
 			select {
 			case <-sqc.done:
+				log.Printf("SqueueChecker.start goroutine loop: done")
 				ticker.Stop()
 				return
 			case <-ticker.C:
+			     	start := time.Now()
 				sqc.check()
+				checkDuration := time.Since(start)
+				log.Printf("SqueueChecker.start goroutine loop: check() took %v", checkDuration)
+			     	start = time.Now()
 				sqc.reniceAll()
+				reniceDuration := time.Since(start)
+				log.Printf("SqueueChecker.start goroutine loop: reniceAll() took %v", reniceDuration)
 				select {
 				case <-ticker.C:
 					// If this iteration took
@@ -226,6 +263,7 @@ func (sqc *SqueueChecker) start() {
 					// consume the next tick and
 					// wait. Otherwise we would
 					// starve other goroutines.
+					log.Printf("SqueueChecker.start goroutine loop: consuming ticker without update")
 				default:
 				}
 			}
@@ -239,7 +277,12 @@ func (sqc *SqueueChecker) All() []string {
 	sqc.startOnce.Do(sqc.start)
 	sqc.lock.RLock()
 	defer sqc.lock.RUnlock()
+	log.Printf("SqueueChecker.All: waiting for squeue update")
+	start := time.Now()
 	sqc.notify.Wait()
+	duration := time.Since(start)
+	log.Printf("SqueueChecker.All: waited for squeue update for %v", duration)
+
 	var uuids []string
 	for u := range sqc.queue {
 		uuids = append(uuids, u)

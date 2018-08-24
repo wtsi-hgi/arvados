@@ -317,6 +317,7 @@ func (disp *Dispatcher) runContainer(_ *dispatch.Dispatcher, ctr arvados.Contain
 	go func(uuid string) {
 		for ctx.Err() == nil && disp.sqCheck.HasUUID(uuid) {
 		}
+		log.Printf("WARNING: runContainer: squeue no longer has uuid %s, cancelling", uuid)
 		cancel()
 	}(ctr.UUID)
 
@@ -335,6 +336,7 @@ func (disp *Dispatcher) runContainer(_ *dispatch.Dispatcher, ctr arvados.Contain
 			}
 			return
 		case updated, ok := <-status:
+			start := time.Now()
 			if !ok {
 				log.Printf("container %s is done: cancel slurm job", ctr.UUID)
 				disp.scancel(ctr)
@@ -351,6 +353,10 @@ func (disp *Dispatcher) runContainer(_ *dispatch.Dispatcher, ctr arvados.Contain
 					p = int64(p)<<50 - (updated.CreatedAt.UnixNano() >> 14)
 				}
 				disp.sqCheck.SetPriority(ctr.UUID, p)
+			}
+			duration := time.Since(start)
+			if duration > disp.PollPeriod.Duration() {
+				log.Printf("WARNING: runContainer update for container %s took %v which is longer than PollPeriod", ctr.UUID, duration)
 			}
 		}
 	}
