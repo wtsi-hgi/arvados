@@ -258,6 +258,7 @@ func (disp *Dispatcher) submit(container arvados.Container, crunchRunCommand []s
 
 	sbArgs, err := disp.sbatchArgs(container)
 	if err != nil {
+	        log.Printf("debug: submit got error from sbatchArgs for container %s: %v", container.UUID, err)
 		return err
 	}
 	log.Printf("running sbatch %+q", sbArgs)
