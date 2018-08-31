@@ -1,4 +1,4 @@
-// Copyright (C) The Arvados Authors. All rights reserved.
+/// Copyright (C) The Arvados Authors. All rights reserved.
 //
 // SPDX-License-Identifier: AGPL-3.0
 
@@ -718,7 +718,7 @@ func (s *TestSuite) fullRunHelper(c *C, record string, extraMounts []string, exi
 	err = json.Unmarshal([]byte(record), &sm)
 	c.Check(err, IsNil)
 	secretMounts, err := json.Marshal(sm)
-	c.Logf("%s %q", sm, secretMounts)
+	c.Logf("%v %q", sm, secretMounts)
 	c.Check(err, IsNil)
 
 	s.docker.exitCode = exitCode
@@ -2112,4 +2112,44 @@ func (s *TestSuite) TestCheckContainerdMissing(c *C) {
 		return []PsProcess{FakeProcess{[]string{"abc"}}}, nil
 	})
 	c.Check(err, ErrorMatches, `'containerd' not found in process list.`)
+}
+
+func (s *TestSuite) TestGetBindMapMountPrefixes1(c *C) {
+	testBindMapMounts := map[string]string{
+		"/var/spool/cwl":     "/keep/d41d8cd98f00b204e9800998ecf8427e",
+		"/var/spool/cwl/foo": "/keep/acbd18db4cc2f85cedef654fccc4a4d8",
+		"/var/spool/cwl/bar": "/keep/37b51d194a7513e45b56f6524f2d51f2",
+	}
+	prefixes := getBindMapMountPrefixes(testBindMapMounts)
+	c.Assert(prefixes, NotNil)
+	c.Assert(len(prefixes), Equals, 1)
+	c.Check(prefixes[0], Equals, "/var/spool/cwl")
+}
+
+func (s *TestSuite) TestGetBindMapMountPrefixes2(c *C) {
+	testBindMapMounts := map[string]string{
+		"/var/spool/cwl":     "/keep/d41d8cd98f00b204e9800998ecf8427e",
+		"/var/spool/other":   "/keep/d41d8cd98f00b204e9800998ecf8427e",
+		"/var/spool/cwl/foo": "/keep/acbd18db4cc2f85cedef654fccc4a4d8",
+		"/var/spool/cwl/bar": "/keep/37b51d194a7513e45b56f6524f2d51f2",
+	}
+	prefixes := getBindMapMountPrefixes(testBindMapMounts)
+	c.Assert(prefixes, NotNil)
+	c.Assert(len(prefixes), Equals, 2)
+	c.Check(prefixes[0], Equals, "/var/spool/cwl")
+	c.Check(prefixes[1], Equals, "/var/spool/other")
+}
+
+func (s *TestSuite) TestGetBindMapMountPrefixes3(c *C) {
+	testBindMapMounts := map[string]string{
+		"/var/spool/cwl":     "/keep/d41d8cd98f00b204e9800998ecf8427e",
+		"/var/spool/other":   "/keep/d41d8cd98f00b204e9800998ecf8427e",
+		"/var/spool/cwl/foo": "/keep/acbd18db4cc2f85cedef654fccc4a4d8",
+		"/var/spool/cwl/bar": "/keep/37b51d194a7513e45b56f6524f2d51f2",
+		"/var/spool":         "/keep/d41d8cd98f00b204e9800998ecf8427e",
+	}
+	prefixes := getBindMapMountPrefixes(testBindMapMounts)
+	c.Assert(prefixes, NotNil)
+	c.Assert(len(prefixes), Equals, 1)
+	c.Check(prefixes[0], Equals, "/var/spool")
 }

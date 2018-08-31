@@ -68,6 +68,7 @@ type IKeepClient interface {
 type NewLogWriter func(name string) (io.WriteCloser, error)
 
 type RunArvMount func(args []string, tok string) (*exec.Cmd, error)
+type RunBindMapMount func(args []string) (*exec.Cmd, error)
 
 type MkTempDir func(string, string) (string, error)
 
@@ -86,6 +87,11 @@ type ThinDockerClient interface {
 
 type PsProcess interface {
 	CmdlineSlice() ([]string, error)
+}
+
+type BindMapFuseConfig struct {
+	Mounts map[string]string `json:"mounts"`
+	Debug  bool
 }
 
 // ContainerRunner is the main stateful struct used for a single execution of a
@@ -109,19 +115,25 @@ type ContainerRunner struct {
 	LogCollection arvados.CollectionFileSystem
 	LogsPDH       *string
 	RunArvMount
+	RunBindMapMount
 	MkTempDir
-	ArvMount      *exec.Cmd
-	ArvMountPoint string
-	HostOutputDir string
-	Binds         []string
-	Volumes       map[string]struct{}
-	OutputPDH     *string
-	SigChan       chan os.Signal
-	ArvMountExit  chan error
-	SecretMounts  map[string]arvados.Mount
-	MkArvClient   func(token string) (IArvadosClient, error)
-	finalState    string
-	parentTemp    string
+	ArvMount          *exec.Cmd
+	ArvMountPoint     string
+	BindMapMount      *exec.Cmd
+	BindMapMountPoint string
+	HostOutputDir     string
+	Binds             []string
+	BindMapMounts     map[string]string
+	Volumes           map[string]struct{}
+	OutputPDH         *string
+	SigChan           chan os.Signal
+	ArvMountExit      chan error
+	BindMapMountExit  chan error
+	SecretMounts      map[string]arvados.Mount
+	MkArvClient       func(token string) (IArvadosClient, error)
+	CheckInputs       bool
+	finalState        string
+	parentTemp        string
 
 	ListProcesses func() ([]PsProcess, error)
 
@@ -151,6 +163,7 @@ type ContainerRunner struct {
 	enableNetwork   string // one of "default" or "always"
 	networkMode     string // passed through to HostConfig.NetworkMode
 	arvMountLog     *ThrottledLogger
+	bindMapMountLog *ThrottledLogger
 	checkContainerd time.Duration
 }
 
@@ -342,9 +355,55 @@ func (runner *ContainerRunner) ArvMountCmd(arvMountCmd []string, token string) (
 	return c, nil
 }
 
+func (runner *ContainerRunner) BindMapMountCmd(bindMapMountCmd []string) (c *exec.Cmd, err error) {
+	c = exec.Command("bindmapfuse", bindMapMountCmd...)
+
+	w, err := runner.NewLogWriter("bindmapfuse")
+	if err != nil {
+		return nil, err
+	}
+	runner.bindMapMountLog = NewThrottledLogger(w)
+	c.Stdout = runner.bindMapMountLog
+	c.Stderr = runner.bindMapMountLog
+
+	runner.CrunchLog.Printf("Running %v", c.Args)
+
+	err = c.Start()
+	if err != nil {
+		return nil, err
+	}
+
+	runner.BindMapMountExit = make(chan error)
+
+	go func() {
+		mnterr := c.Wait()
+		if mnterr != nil {
+			runner.CrunchLog.Printf("bindmapfuse exit error: %v", mnterr)
+		}
+		runner.BindMapMountExit <- mnterr
+		close(runner.BindMapMountExit)
+	}()
+
+	select {
+	case err := <-runner.BindMapMountExit:
+		runner.BindMapMount = nil
+		return nil, err
+	default:
+		return c, nil
+	}
+
+}
+
 func (runner *ContainerRunner) SetupArvMountPoint(prefix string) (err error) {
 	if runner.ArvMountPoint == "" {
 		runner.ArvMountPoint, err = runner.MkTempDir(runner.parentTemp, prefix)
+	}
+	return
+}
+
+func (runner *ContainerRunner) SetupBindMapMountPoint(prefix string) (err error) {
+	if runner.BindMapMountPoint == "" {
+		runner.BindMapMountPoint, err = runner.MkTempDir(runner.parentTemp, prefix)
 	}
 	return
 }
@@ -386,6 +445,11 @@ func (runner *ContainerRunner) SetupMounts() (err error) {
 		return fmt.Errorf("While creating keep mount temp dir: %v", err)
 	}
 
+	err = runner.SetupBindMapMountPoint("bindmap")
+	if err != nil {
+		return fmt.Errorf("While creating bindmap mount temp dir: %v", err)
+	}
+
 	token, err := runner.ContainerToken()
 	if err != nil {
 		return fmt.Errorf("could not get container token: %s", err)
@@ -406,6 +470,7 @@ func (runner *ContainerRunner) SetupMounts() (err error) {
 	collectionPaths := []string{}
 	runner.Binds = nil
 	runner.Volumes = make(map[string]struct{})
+	runner.BindMapMounts = make(map[string]string)
 	needCertMount := true
 	type copyFile struct {
 		src  string
@@ -515,7 +580,8 @@ func (runner *ContainerRunner) SetupMounts() (err error) {
 					runner.Binds = append(runner.Binds, fmt.Sprintf("%s:%s", src, bind))
 				}
 			} else {
-				runner.Binds = append(runner.Binds, fmt.Sprintf("%s:%s:ro", src, bind))
+				// runner.Binds = append(runner.Binds, fmt.Sprintf("%s:%s:ro", src, bind))
+				runner.BindMapMounts[bind] = src
 			}
 			collectionPaths = append(collectionPaths, src)
 
@@ -607,10 +673,40 @@ func (runner *ContainerRunner) SetupMounts() (err error) {
 		return fmt.Errorf("While trying to start arv-mount: %v", err)
 	}
 
+	// prepare map of mounts in bindmapfuse config file
+	bindMapFuseConfig := &BindMapFuseConfig{Mounts: runner.BindMapMounts}
+	bindMapFuseConfigFile := fmt.Sprintf("%s/config.yaml", runner.BindMapMountPoint)
+	bindMapFuseConfigWriter, err := os.Create(bindMapFuseConfigFile)
+	if err != nil {
+		return fmt.Errorf("While trying to create bindmapfuse config file: %v", err)
+	}
+	err = json.NewEncoder(bindMapFuseConfigWriter).Encode(bindMapFuseConfig)
+	if err != nil {
+		return fmt.Errorf("While trying to write JSON to bindmapfuse config file: %v", err)
+	}
+	bindMapMountCmd := []string{
+		runner.BindMapMountPoint,
+		"-o", bindMapFuseConfigFile}
+	runner.BindMapMount, err = runner.RunBindMapMount(bindMapMountCmd)
+	if err != nil {
+		return fmt.Errorf("While trying to start bindmapfuse: %v", err)
+	}
+
+	bindMapMountPrefixes := getBindMapMountPrefixes(runner.BindMapMounts)
+
+	// setup a docker bind mount to mount all prefixes under the bindmap mount point read-only
+	for _, bindMapMountPrefix := range bindMapMountPrefixes {
+		runner.Binds = append(runner.Binds, fmt.Sprintf("%s/%s:%s:ro", runner.BindMapMountPoint, bindMapMountPrefix, bindMapMountPrefix))
+	}
+
 	for _, p := range collectionPaths {
-		_, err = os.Stat(p)
-		if err != nil {
-			return fmt.Errorf("While checking that input files exist: %v", err)
+		if runner.CheckInputs {
+			_, err = os.Stat(p)
+			if err != nil {
+				return fmt.Errorf("While checking that input files exist: %v", err)
+			}
+		} else {
+			runner.CrunchLog.Printf("Skipping check for input file %s", p)
 		}
 	}
 
@@ -952,7 +1048,7 @@ func (runner *ContainerRunner) AttachStreams() (err error) {
 		go func() {
 			_, err := io.Copy(response.Conn, stdinRdr)
 			if err != nil {
-				runner.CrunchLog.Print("While writing stdin collection to docker container %q", err)
+				runner.CrunchLog.Printf("While writing stdin collection to docker container %q", err)
 				runner.stop(nil)
 			}
 			stdinRdr.Close()
@@ -962,7 +1058,7 @@ func (runner *ContainerRunner) AttachStreams() (err error) {
 		go func() {
 			_, err := io.Copy(response.Conn, bytes.NewReader(stdinJson))
 			if err != nil {
-				runner.CrunchLog.Print("While writing stdin json to docker container %q", err)
+				runner.CrunchLog.Printf("While writing stdin json to docker container %q", err)
 				runner.stop(nil)
 			}
 			response.CloseWrite()
@@ -1596,6 +1692,7 @@ func NewContainerRunner(client *arvados.Client, api IArvadosClient, kc IKeepClie
 	}
 	cr.NewLogWriter = cr.NewArvLogWriter
 	cr.RunArvMount = cr.ArvMountCmd
+	cr.RunBindMapMount = cr.BindMapMountCmd
 	cr.MkTempDir = ioutil.TempDir
 	cr.ListProcesses = func() ([]PsProcess, error) {
 		pr, err := process.Processes()
@@ -1733,4 +1830,31 @@ func main() {
 	if runerr != nil {
 		log.Fatalf("%s: %v", containerId, runerr)
 	}
+}
+
+// find the smallest set of bindmapmounts that share a prefix with all of them
+// i.e. for ["/var/spool/cwl", "/var/spool/cwl/x", /var/spool/cwl/y"] then
+// ["/var/spool/cwl"] would be the single shared prefix
+// but if "/var/spool/cwl" was not a bind mount, then the other two would
+// not share a prefix which is also a bind mount, so for
+// ["/var/spool/cwl/x", /var/spool/cwl/y"] the shared prefixes would be
+// ["/var/spool/cwl/x", /var/spool/cwl/y"]
+func getBindMapMountPrefixes(bindMapMounts map[string]string) (bindMapMountPrefixes []string) {
+	var bindMapMountKeys []string
+	for m := range bindMapMounts {
+		bindMapMountKeys = append(bindMapMountKeys, m)
+	}
+	sort.Strings(bindMapMountKeys)
+	if len(bindMapMountKeys) > 0 {
+		i := 0
+		for i < len(bindMapMountKeys) {
+			bindMapMountPrefix := bindMapMountKeys[i]
+			// wind through all keys until we find one that doesn't have this prefix
+			for i < len(bindMapMountKeys) && strings.HasPrefix(bindMapMountKeys[i], bindMapMountPrefix) {
+				i++
+			}
+			bindMapMountPrefixes = append(bindMapMountPrefixes, bindMapMountPrefix)
+		}
+	}
+	return
 }
