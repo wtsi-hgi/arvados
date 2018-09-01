@@ -134,7 +134,8 @@ type ContainerRunner struct {
 	CheckInputs       bool
 	finalState        string
 	parentTemp        string
-
+	Debug		  bool
+	
 	ListProcesses func() ([]PsProcess, error)
 
 	statLogger       io.WriteCloser
@@ -358,6 +359,14 @@ func (runner *ContainerRunner) ArvMountCmd(arvMountCmd []string, token string) (
 func (runner *ContainerRunner) BindMapMountCmd(bindMapMountCmd []string) (c *exec.Cmd, err error) {
 	c = exec.Command("bindmapfuse", bindMapMountCmd...)
 
+	c.Env = nil
+	for _, s := range os.Environ() {
+		c.Env = append(c.Env, s)
+	}
+	if runner.Debug {
+		c.Env = append(c.Env, "BINDMAPFUSE_TRACE=*")
+	}
+	
 	w, err := runner.NewLogWriter("bindmapfuse")
 	if err != nil {
 		return nil, err
@@ -466,6 +475,8 @@ func (runner *ContainerRunner) SetupMounts() (err error) {
 	if runner.Container.RuntimeConstraints.KeepCacheRAM > 0 {
 		arvMountCmd = append(arvMountCmd, "--file-cache", fmt.Sprintf("%d", runner.Container.RuntimeConstraints.KeepCacheRAM))
 	}
+
+	arvMountCmd = append(arvMountCmd, "--directory-cache", fmt.Sprintf("%d", 1024*1024*1024))
 
 	collectionPaths := []string{}
 	runner.Binds = nil
@@ -674,8 +685,8 @@ func (runner *ContainerRunner) SetupMounts() (err error) {
 	}
 
 	// prepare map of mounts in bindmapfuse config file
-	bindMapFuseConfig := &BindMapFuseConfig{Mounts: runner.BindMapMounts}
-	bindMapFuseConfigFile := fmt.Sprintf("%s/config.yaml", runner.BindMapMountPoint)
+	bindMapFuseConfig := &BindMapFuseConfig{Mounts: runner.BindMapMounts, Debug: runner.Debug}
+	bindMapFuseConfigFile := fmt.Sprintf("%s/config.yaml", runner.parentTemp)
 	bindMapFuseConfigWriter, err := os.Create(bindMapFuseConfigFile)
 	if err != nil {
 		return fmt.Errorf("While trying to create bindmapfuse config file: %v", err)
@@ -686,7 +697,7 @@ func (runner *ContainerRunner) SetupMounts() (err error) {
 	}
 	bindMapMountCmd := []string{
 		runner.BindMapMountPoint,
-		"-o", bindMapFuseConfigFile}
+		"-o", fmt.Sprintf("allow_other,bind_map_config=%s", bindMapFuseConfigFile)}
 	runner.BindMapMount, err = runner.RunBindMapMount(bindMapMountCmd)
 	if err != nil {
 		return fmt.Errorf("While trying to start bindmapfuse: %v", err)
@@ -696,7 +707,7 @@ func (runner *ContainerRunner) SetupMounts() (err error) {
 
 	// setup a docker bind mount to mount all prefixes under the bindmap mount point read-only
 	for _, bindMapMountPrefix := range bindMapMountPrefixes {
-		runner.Binds = append(runner.Binds, fmt.Sprintf("%s/%s:%s:ro", runner.BindMapMountPoint, bindMapMountPrefix, bindMapMountPrefix))
+		runner.Binds = append(runner.Binds, fmt.Sprintf("%s:%s:ro", filepath.Join(runner.BindMapMountPoint, bindMapMountPrefix), bindMapMountPrefix))
 	}
 
 	for _, p := range collectionPaths {
@@ -1320,6 +1331,54 @@ func (runner *ContainerRunner) CaptureOutput() error {
 }
 
 func (runner *ContainerRunner) CleanupDirs() {
+	if runner.BindMapMount != nil {
+		var delay int64 = 8
+		umount := exec.Command("fusermount", "-u", runner.BindMapMountPoint)
+		umount.Stdout = runner.CrunchLog
+		umount.Stderr = runner.CrunchLog
+		runner.CrunchLog.Printf("Running %v", umount.Args)
+		umnterr := umount.Start()
+
+		if umnterr != nil {
+			runner.CrunchLog.Printf("Error unmounting: %v", umnterr)
+		} else {
+			// If fusermount -u gets stuck for any reason, we
+			// don't want to wait for it forever.  Do Wait() in a goroutine
+			// so it doesn't block crunch-run.
+			umountExit := make(chan error)
+			go func() {
+				mnterr := umount.Wait()
+				if mnterr != nil {
+					runner.CrunchLog.Printf("Error unmounting: %v", mnterr)
+				}
+				umountExit <- mnterr
+			}()
+
+			for again := true; again; {
+				again = false
+				select {
+				case <-umountExit:
+					umount = nil
+					again = true
+				case <-runner.BindMapMountExit:
+					break
+				case <-time.After(time.Duration((delay + 1) * int64(time.Second))):
+					runner.CrunchLog.Printf("Timed out waiting for unmount")
+					if umount != nil {
+						umount.Process.Kill()
+					}
+					runner.BindMapMount.Process.Kill()
+				}
+			}
+		}
+	}
+
+	if runner.BindMapMountPoint != "" {
+		if rmerr := os.Remove(runner.BindMapMountPoint); rmerr != nil {
+			runner.CrunchLog.Printf("While cleaning up bindmapmount directory %s: %v", runner.BindMapMountPoint, rmerr)
+		}
+	}
+	
 	if runner.ArvMount != nil {
 		var delay int64 = 8
 		umount := exec.Command("arv-mount", fmt.Sprintf("--unmount-timeout=%d", delay), "--unmount", runner.ArvMountPoint)
