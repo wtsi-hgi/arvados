@@ -18,6 +18,7 @@ const slurm15NiceLimit int64 = 10000
 
 type slurmJob struct {
 	uuid         string
+	state        string
 	wantPriority int64
 	priority     int64 // current slurm priority (incorporates nice value)
 	nice         int64 // current slurm nice value
@@ -29,6 +30,7 @@ type slurmJob struct {
 type SqueueChecker struct {
 	Period         time.Duration
 	PrioritySpread int64
+	NiceLimit      int64
 	Slurm          Slurm
 	queue          map[string]*slurmJob
 	startOnce      sync.Once
@@ -47,11 +49,12 @@ func (sqc *SqueueChecker) HasUUID(uuid string) bool {
 	defer sqc.lock.RUnlock()
 
 	// block until next squeue broadcast signaling an update.
-	log.Printf("SqueueChecker.HasUUID: waiting for squeue update for uuid %s", uuid)
 	start := time.Now()
 	sqc.notify.Wait()
 	duration := time.Since(start)
-	log.Printf("SqueueChecker.HasUUID: waited for squeue update for %v (uuid %s)", duration, uuid)
+	if duration > 10 * time.Second {
+		log.Printf("SqueueChecker.HasUUID: waited for squeue update for %v (uuid %s)", duration, uuid)
+	}
 	_, exists := sqc.queue[uuid]
 	return exists
 }
@@ -66,11 +69,12 @@ func (sqc *SqueueChecker) SetPriority(uuid string, want int64) {
 	if job == nil {
 		// Wait in case the slurm job was just submitted and
 		// will appear in the next squeue update.
-		log.Printf("SqueueChecker.SetPriority: waiting for squeue update for uuid %s", uuid)
 		start := time.Now()
 		sqc.notify.Wait()
 		duration := time.Since(start)
-		log.Printf("SqueueChecker.SetPriority: waited for squeue update for %v (uuid %s)", duration, uuid)
+		if duration > 10 * time.Second {
+			log.Printf("SqueueChecker.SetPriority: waited for squeue update for %v (uuid %s)", duration, uuid)
+		}
 
 		job = sqc.queue[uuid]
 	}
@@ -93,9 +97,28 @@ func (sqc *SqueueChecker) reniceAll() {
 	jobs := make([]*slurmJob, 0, len(sqc.queue))
 	unknownPriorityCount := 0
 	lowPriorityCount := 0
+	notQueuedCount := 0
+	processCount := 0
 	start := time.Now()
 	log.Printf("SqueueChecker.reniceAll: looping over sqc.queue of %d entries", len(sqc.queue))
 	for _, j := range sqc.queue {
+	    	switch j.state {
+		case
+			"BOOT_FAIL",
+			"CANCELLED",
+			"COMPLETED",
+			"CONFIGURING",
+			"COMPLETING",
+			"DEADLINE",
+			"FAILED",
+			"OUT_OF_MEMORY",
+			"RUNNING",
+			"REVOKED",
+			"STOPPED",
+			"TIMEOUT":
+				notQueuedCount++
+				continue
+		}
 		if j.wantPriority == 0 {
 			// SLURM job with unknown Arvados priority
 			// (perhaps it's not an Arvados job)
@@ -111,10 +134,13 @@ func (sqc *SqueueChecker) reniceAll() {
 			lowPriorityCount++
 			continue
 		}
+		processCount++
 		jobs = append(jobs, j)
 	}
 	duration := time.Since(start)
-	log.Printf("SqueueChecker.reniceAll: finished looping over sqc.queue of %d entries in %v - %d jobs had unknown Arvados priority and %d jobs had low priority", len(sqc.queue), duration, unknownPriorityCount, lowPriorityCount)
+	if duration > 10 * time.Second {
+		log.Printf("SqueueChecker.reniceAll: finished looping over sqc.queue of %d entries in %v - will process %d jobs after skipping %d jobs with unknown Arvados priority, %d jobs with low priority, and %d jobs that were not queued", len(sqc.queue), duration, processCount, unknownPriorityCount, lowPriorityCount, notQueuedCount)
+	}
 
 	start = time.Now()
 	sort.Slice(jobs, func(i, j int) bool {
@@ -128,15 +154,23 @@ func (sqc *SqueueChecker) reniceAll() {
 			return jobs[i].uuid > jobs[j].uuid
 		}
 	})
-	renice := wantNice(jobs, sqc.PrioritySpread)
+	renice := wantNice(jobs, sqc.PrioritySpread, sqc.NiceLimit)
 	duration = time.Since(start)
-	log.Printf("SqueueChecker.reniceAll: sorting jobs took %v", duration)
+	if duration > 10 * time.Second {
+		log.Printf("SqueueChecker.reniceAll: sorting %d jobs took %v, now have %d renice", len(jobs), duration, len(renice))
+	}
 	
 	start = time.Now()
 	reniceCount := 0
 	equalCount := 0
-	log.Printf("SqueueChecker.reniceAll: starting renice loop over %d jobs", len(jobs))
-	for i, job := range jobs {
+	var reniceTotalDuration time.Duration
+	limit := len(jobs)
+	if limit > 100 {
+		limit = 100
+		log.Printf("SqueueChecker.reniceAll: only renicing the top %d jobs", limit)
+	}
+	log.Printf("SqueueChecker.reniceAll: starting renice loop over %d jobs", len(jobs[:limit]))
+	for i, job := range jobs[:limit] {
 		niceNew := renice[i]
 		if job.hitNiceLimit && niceNew > slurm15NiceLimit {
 			niceNew = slurm15NiceLimit
@@ -146,14 +180,24 @@ func (sqc *SqueueChecker) reniceAll() {
 			continue
 		}
 		reniceCount++
+		rnStart := time.Now()
 		err := sqc.Slurm.Renice(job.uuid, niceNew)
+		rnDuration := time.Since(rnStart)
+		reniceTotalDuration = reniceTotalDuration + rnDuration
+		if rnDuration > 10 * time.Second {
+			log.Printf("SqueueChecker.reniceAll: reniced job %s in %v", job.uuid, rnDuration)
+		}
 		if err != nil && niceNew > slurm15NiceLimit && strings.Contains(err.Error(), "Invalid nice value") {
 			log.Printf("container %q clamping nice values at %d, priority order will not be correct -- see https://dev.arvados.org/projects/arvados/wiki/SLURM_integration#Limited-nice-values-SLURM-15", job.uuid, slurm15NiceLimit)
 			job.hitNiceLimit = true
+		} else if err != nil {
+			log.Printf("SqueueChecker.reniceAll: Renice(%s, %d) ERROR: %v", job.uuid, niceNew, err)
 		}
 	}
 	duration = time.Since(start)
-	log.Printf("SqueueChecker.reniceAll: renice loop over %d jobs complete after %v - reniced %d jobs while %d jobs already had the correct nice value", len(jobs), duration, reniceCount, equalCount)
+	if duration > 10 * time.Second {
+		log.Printf("SqueueChecker.reniceAll: renice loop over %d jobs complete after %v (renice total time %v) - reniced %d jobs while %d jobs already had the correct nice value", limit, duration, reniceTotalDuration, reniceCount, equalCount)
+	}
 }
 
 // Stop stops the squeue monitoring goroutine. Do not call HasUUID
@@ -198,6 +242,7 @@ func (sqc *SqueueChecker) check() {
 		}
 		replacing.priority = p
 		replacing.nice = n
+		replacing.state = state
 		newq[uuid] = replacing
 
 		if state == "PENDING" && ((reason == "BadConstraints" && p <= 2*slurm15NiceLimit) || reason == "launch failed requeued held") && replacing.wantPriority > 0 {
@@ -251,11 +296,15 @@ func (sqc *SqueueChecker) start() {
 			     	start := time.Now()
 				sqc.check()
 				checkDuration := time.Since(start)
-				log.Printf("SqueueChecker.start goroutine loop: check() took %v", checkDuration)
+				if checkDuration > 10 * time.Second {
+					log.Printf("SqueueChecker.start goroutine loop: check() took %v", checkDuration)
+				}
 			     	start = time.Now()
 				sqc.reniceAll()
 				reniceDuration := time.Since(start)
-				log.Printf("SqueueChecker.start goroutine loop: reniceAll() took %v", reniceDuration)
+				if reniceDuration > 10 * time.Second {
+					log.Printf("SqueueChecker.start goroutine loop: reniceAll() took %v", reniceDuration)
+				}
 				select {
 				case <-ticker.C:
 					// If this iteration took
@@ -277,11 +326,12 @@ func (sqc *SqueueChecker) All() []string {
 	sqc.startOnce.Do(sqc.start)
 	sqc.lock.RLock()
 	defer sqc.lock.RUnlock()
-	log.Printf("SqueueChecker.All: waiting for squeue update")
 	start := time.Now()
 	sqc.notify.Wait()
 	duration := time.Since(start)
-	log.Printf("SqueueChecker.All: waited for squeue update for %v", duration)
+	if duration > 10 * time.Second { 
+		log.Printf("SqueueChecker.All: waited for squeue update for %v", duration)
+	}
 
 	var uuids []string
 	for u := range sqc.queue {

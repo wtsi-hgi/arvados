@@ -10,6 +10,7 @@ import (
 	"log"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 type Slurm interface {
@@ -26,7 +27,7 @@ type slurmCLI struct{
 
 func NewSlurmCLI() *slurmCLI {
 	return &slurmCLI{
-	       runSemaphore: make(chan bool, 3),
+	       runSemaphore: make(chan bool, 10),
 	}
 }
 
@@ -72,8 +73,16 @@ func (scli *slurmCLI) Renice(name string, nice int64) error {
 }
 
 func (scli *slurmCLI) run(stdin io.Reader, prog string, args []string) error {
+        progArgs := fmt.Sprintf("%s %s", prog, strings.Join(args, " "))
+        log.Printf("slurmCLI.run() waiting for run semaphore to run %s", progArgs)
+	smStart := time.Now()
 	scli.runSemaphore <- true
+	smDuration := time.Since(smStart)
+	if smDuration > 10 * time.Second {
+	        log.Printf("slurmCLI.run() got run semaphore after waiting for %v to run %s", smDuration, progArgs)
+	}
 	defer func() { <-scli.runSemaphore }()
+	cmStart := time.Now()
 	cmd := exec.Command(prog, args...)
 	cmd.Stdin = stdin
 	out, err := cmd.CombinedOutput()
@@ -83,6 +92,10 @@ func (scli *slurmCLI) run(stdin io.Reader, prog string, args []string) error {
 	}
 	if err != nil {
 		err = fmt.Errorf("%s: %s (%q)", cmd.Path, err, outTrim)
+	}
+	cmDuration := time.Since(cmStart)	
+	if cmDuration > 10 * time.Second {
+		log.Printf("slurmCLI.run() command %s took %v to run", progArgs, cmDuration)
 	}
 	return err
 }

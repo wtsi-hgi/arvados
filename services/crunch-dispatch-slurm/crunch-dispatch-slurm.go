@@ -44,7 +44,8 @@ type Dispatcher struct {
 	SbatchArguments []string
 	PollPeriod      arvados.Duration
 	PrioritySpread  int64
-
+	NiceLimit	int64
+	
 	// crunch-run command to invoke. The container UUID will be
 	// appended. If nil, []string{"crunch-run"} will be used.
 	//
@@ -163,6 +164,7 @@ func (disp *Dispatcher) setup() {
 	disp.sqCheck = &SqueueChecker{
 		Period:         time.Duration(disp.PollPeriod),
 		PrioritySpread: disp.PrioritySpread,
+		NiceLimit:	disp.NiceLimit,
 		Slurm:          disp.slurm,
 	}
 	disp.Dispatcher = &dispatch.Dispatcher{

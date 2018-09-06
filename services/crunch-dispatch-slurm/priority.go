@@ -4,6 +4,10 @@
 
 package main
 
+import (
+	"math"
+)
+
 const defaultSpread int64 = 10
 
 // wantNice calculates appropriate nice values for a set of SLURM
@@ -17,7 +21,7 @@ const defaultSpread int64 = 10
 // running non-Arvados jobs with low nice values.
 //
 // If spread<1, a sensible default (10) is used.
-func wantNice(jobs []*slurmJob, spread int64) []int64 {
+func wantNice(jobs []*slurmJob, spread int64, niceLimit int64) []int64 {
 	if len(jobs) == 0 {
 		return nil
 	}
@@ -25,6 +29,11 @@ func wantNice(jobs []*slurmJob, spread int64) []int64 {
 	if spread < 1 {
 		spread = defaultSpread
 	}
+
+	if niceLimit < 1 {
+		niceLimit = math.MaxInt64
+	}
+
 	renice := make([]int64, len(jobs))
 
 	// highest usable priority (without going out of order)
@@ -51,6 +60,9 @@ func wantNice(jobs []*slurmJob, spread int64) []int64 {
 			}
 		}
 		target--
+		if renice[i] > niceLimit {
+			renice[i] = niceLimit
+		}
 	}
 	return renice
 }
