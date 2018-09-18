@@ -100,10 +100,11 @@ class ArvadosContainer(object):
                 continue
             if prevdir and target.startswith(prevdir):
                 continue
-            if tp == "Directory":
-                targetdir = target
-            else:
-                targetdir = os.path.dirname(target)
+            # if tp == "Directory":
+            #     targetdir = target
+            # else:
+            #     targetdir = os.path.dirname(target)
+            targetdir = target
             sp = resolved.split("/", 1)
             pdh = sp[0][5:]   # remove "keep:"
             mounts[targetdir] = {
@@ -111,10 +112,11 @@ class ArvadosContainer(object):
                 "portable_data_hash": pdh
             }
             if len(sp) == 2:
-                if tp == "Directory":
-                    path = sp[1]
-                else:
-                    path = os.path.dirname(sp[1])
+                # if tp == "Directory":
+                #     path = sp[1]
+                # else:
+                #     path = os.path.dirname(sp[1])
+                path = sp[1]
                 if path and path != "/":
                     mounts[targetdir]["path"] = path
             prevdir = targetdir + "/"

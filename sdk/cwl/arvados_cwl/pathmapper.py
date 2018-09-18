@@ -159,18 +159,47 @@ class ArvPathMapper(PathMapper):
 
                 ab = self.collection_pattern % c.portable_data_hash()
                 self._pathmap[srcobj["location"]] = MapperEnt("keep:"+c.portable_data_hash(), ab, "Directory", True)
+
             elif srcobj["class"] == "File" and (srcobj.get("secondaryFiles") or
                 (srcobj["location"].startswith("_:") and "contents" in srcobj)):
 
+                src = srcobj["location"]
+                if isinstance(src, basestring) and ArvPathMapper.pdh_dirpath.match(src):
+                    # if all secondaryFiles are in the same source collection, a new collection is not needed
+                    main_me = self._pathmap.get(src)
+                    if main_me is None:
+                        logger.warn("pathmapper.setup: main file src=%s not found in pathmap" % src)
+                    else:
+                        main_dirname = os.path.dirname(main_me.target)
+                        all_same = True
+                        for l in srcobj.get("secondaryFiles", []):
+                            secondary_src = l["location"]
+                            if isinstance(secondary_src, basestring) and ArvPathMapper.pdh_dirpath.match(secondary_src):
+                                me = self._pathmap.get(secondary_src)
+                                if me is None:
+                                    logger.warn("pathmapper.setup: secondary src=%s not found in pathmap" % secondary_src)
+                                    all_same = False
+                                    break
+                                if main_dirname != os.path.dirname(me.target):
+                                    all_same = False
+                                    break
+                            else:
+                                all_same = False
+                                break
+                            
+                        if all_same:
+                            continue
+                
                 c = arvados.collection.Collection(api_client=self.arvrunner.api,
                                                   keep_client=self.arvrunner.keep_client,
-                                                  num_retries=self.arvrunner.num_retries                                                  )
+                                                  num_retries=self.arvrunner.num_retries)
+
                 self.addentry(srcobj, c, ".", remap)
 
                 check = self.arvrunner.api.collections().list(filters=[["portable_data_hash", "=", c.portable_data_hash()]], limit=1).execute(num_retries=self.arvrunner.num_retries)
                 if not check["items"]:
                     c.save_new(owner_uuid=self.arvrunner.project_uuid)
-
+                    
                 ab = self.file_pattern % (c.portable_data_hash(), srcobj["basename"])
                 self._pathmap[srcobj["location"]] = MapperEnt("keep:%s/%s" % (c.portable_data_hash(), srcobj["basename"]),
                                                               ab, "File", True)
@@ -184,6 +213,8 @@ class ArvPathMapper(PathMapper):
                     if sub.startswith("./"):
                         ab = self.file_pattern % (c.portable_data_hash(), sub[2:])
                     else:
+                        # this code is pointless?
+                        logger.warn("pathmapper.setup: remap sub '%s' did not start with ./ for loc '%s'" % (sub, loc))
                         ab = self.file_pattern % (c.portable_data_hash(), sub)
                     self._pathmap[loc] = MapperEnt("keep:%s/%s" % (c.portable_data_hash(), sub[2:]),
                                                    ab, "Directory", True)
